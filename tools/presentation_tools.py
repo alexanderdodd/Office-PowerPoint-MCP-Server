@@ -21,17 +21,27 @@ def _get_s3_client():
     global _S3_CLIENT
     if _S3_CLIENT is None:
         import boto3
-        # Pin the region explicitly so the presigned URL targets the
-        # regional S3 endpoint (e.g. `s3.eu-west-1.amazonaws.com`).
-        # Without this, boto3 defaults to the global endpoint
-        # (`s3.amazonaws.com`) and any GET against the presigned URL for
-        # a non-us-east-1 bucket comes back as a 307 TemporaryRedirect
-        # XML error instead of the file. AWS_REGION is set automatically
-        # in Lambda; AWS_DEFAULT_REGION is the local-dev fallback.
+        from botocore.config import Config
+
+        # Force the regional S3 endpoint + SigV4 so presigned GETs against
+        # buckets outside us-east-1 don't come back as 307
+        # TemporaryRedirect XML errors. `region_name` alone is not enough
+        # in recent boto3 — virtual-host URLs still hit the global host
+        # unless we also pass an explicit `endpoint_url`. AWS_REGION is
+        # set automatically in Lambda; AWS_DEFAULT_REGION is the
+        # local-dev fallback.
         region = os.environ.get("AWS_REGION") or os.environ.get(
             "AWS_DEFAULT_REGION"
         )
-        _S3_CLIENT = boto3.client("s3", region_name=region) if region else boto3.client("s3")
+        if region:
+            _S3_CLIENT = boto3.client(
+                "s3",
+                region_name=region,
+                endpoint_url=f"https://s3.{region}.amazonaws.com",
+                config=Config(signature_version="s3v4"),
+            )
+        else:
+            _S3_CLIENT = boto3.client("s3")
     return _S3_CLIENT
 
 
