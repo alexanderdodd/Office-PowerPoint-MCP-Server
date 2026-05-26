@@ -53,24 +53,78 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             title="Create Presentation",
         ),
     )
-    def create_presentation(id: Optional[str] = None) -> Dict:
-        """Create a new PowerPoint presentation."""
-        # Create a new presentation
-        pres = ppt_utils.create_presentation()
-        
-        # Generate an ID if not provided
+    def create_presentation(id: Optional[str] = None, blank: bool = False) -> Dict:
+        """Create a new PowerPoint presentation.
+
+        Bizzdesign fork: when the `PPTX_DEFAULT_TEMPLATE` env var is set
+        on the server, this tool seeds the new presentation from that
+        bundled template by default so every deck inherits brand styling
+        and master layouts without the caller having to remember to pick
+        a template. Pass `blank=True` to opt out and get an empty deck.
+
+        If the env-var template can't be found in the configured search
+        directories, the tool falls back to a blank presentation rather
+        than failing — operators see the warning in the returned
+        `template_warning` field.
+        """
+        default_template = os.environ.get("PPTX_DEFAULT_TEMPLATE", "").strip()
+        template_warning: Optional[str] = None
+        resolved_template_path: Optional[str] = None
+
+        if not blank and default_template:
+            # Same lookup as `create_presentation_from_template`: accept an
+            # absolute path verbatim, otherwise scan the configured search
+            # directories for a basename match.
+            if os.path.exists(default_template):
+                resolved_template_path = default_template
+            else:
+                template_name = os.path.basename(default_template)
+                for directory in get_template_search_directories():
+                    candidate = os.path.join(directory, template_name)
+                    if os.path.exists(candidate):
+                        resolved_template_path = candidate
+                        break
+
+            if resolved_template_path is None:
+                template_warning = (
+                    f"PPTX_DEFAULT_TEMPLATE='{default_template}' not found in "
+                    f"search dirs {get_template_search_directories()}; using a "
+                    "blank presentation instead."
+                )
+
+        if resolved_template_path is not None:
+            try:
+                pres = ppt_utils.create_presentation_from_template(resolved_template_path)
+            except Exception as e:
+                pres = ppt_utils.create_presentation()
+                template_warning = (
+                    f"Failed to load PPTX_DEFAULT_TEMPLATE '{resolved_template_path}': "
+                    f"{e}. Using a blank presentation instead."
+                )
+                resolved_template_path = None
+        else:
+            pres = ppt_utils.create_presentation()
+
         if id is None:
             id = f"presentation_{len(presentations) + 1}"
-        
-        # Store the presentation
+
         presentations[id] = pres
-        # Set as current presentation (this would need to be handled by caller)
-        
-        return {
+
+        result: Dict[str, Any] = {
             "presentation_id": id,
-            "message": f"Created new presentation with ID: {id}",
-            "slide_count": len(pres.slides)
+            "slide_count": len(pres.slides),
         }
+        if resolved_template_path is not None:
+            result["message"] = (
+                f"Created presentation '{id}' from bundled template "
+                f"'{resolved_template_path}'."
+            )
+            result["template_path"] = resolved_template_path
+        else:
+            result["message"] = f"Created new (blank) presentation '{id}'."
+        if template_warning is not None:
+            result["template_warning"] = template_warning
+        return result
 
     @app.tool(
         annotations=ToolAnnotations(
