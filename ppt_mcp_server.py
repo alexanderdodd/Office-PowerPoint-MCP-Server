@@ -21,7 +21,8 @@ from tools import (
     register_chart_tools,
     register_connector_tools,
     register_master_tools,
-    register_transition_tools
+    register_transition_tools,
+    register_composition_tools,
 )
 
 # Initialize the FastMCP server
@@ -32,6 +33,11 @@ app = FastMCP(
 # Global state to store presentations in memory
 presentations = {}
 current_presentation_id = None
+
+# Bizzdesign fork: map of presentation_id → source template path. Set when
+# a presentation is created from a template, used by composition tools to
+# re-open the library and clone source slides on demand.
+library_template_paths: dict = {}
 
 # Template configuration
 def get_template_search_directories():
@@ -229,10 +235,18 @@ def open_presentation_wrapper(original_func):
 
 # Register all tool modules
 register_presentation_tools(
-    app, 
-    presentations, 
-    get_current_presentation_id, 
-    get_template_search_directories
+    app,
+    presentations,
+    get_current_presentation_id,
+    get_template_search_directories,
+    library_template_paths,
+)
+
+register_composition_tools(
+    app,
+    presentations,
+    get_current_presentation_id,
+    library_template_paths,
 )
 
 register_content_tools(

@@ -68,7 +68,7 @@ def _get_s3_client():
     return _S3_CLIENT
 
 
-def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, get_template_search_directories):
+def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, get_template_search_directories, library_template_paths: Optional[Dict[str, str]] = None):
     """Register presentation management tools with the FastMCP app"""
     
     @app.tool(
@@ -146,6 +146,10 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             id = f"presentation_{len(presentations) + 1}"
 
         presentations[id] = pres
+        # Record the source template path so composition tools can re-open
+        # the library as a fresh Presentation per call.
+        if library_template_paths is not None and resolved_template_path is not None:
+            library_template_paths[id] = resolved_template_path
 
         # Surface the slide layouts so the model knows which layout_index
         # to pass to `add_slide` for each slide type. Without this info
@@ -165,12 +169,16 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             if stripped_slide_count:
                 result["message"] = (
                     f"Created presentation '{id}' from bundled template "
-                    f"'{resolved_template_path}'. Starts with 0 slides — the "
+                    f"'{resolved_template_path}'. Starts with 0 slides. The "
                     f"template's {stripped_slide_count} example slides were "
-                    f"stripped, but the brand layouts (see `layouts`) and "
-                    f"slide masters are preserved. Build the deck by calling "
-                    f"`add_slide(layout_index=...)` with the layout whose "
-                    f"name matches each slide's role."
+                    f"stripped from the working deck but are available as a "
+                    f"COMPOSITION LIBRARY — prefer the high-level "
+                    f"`add_cover_slide`, `add_section_divider`, "
+                    f"`add_value_props_slide`, `add_solution_detail_slide` "
+                    f"tools (see `list_compositions`) over the low-level "
+                    f"`add_slide` + `add_bullet_points` combo. Compositions "
+                    f"clone proven branded slides from the template and "
+                    f"only need you to supply content."
                 )
             else:
                 result["message"] = (
@@ -285,6 +293,8 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
         # Store the presentation
         presentations[id] = pres
+        if library_template_paths is not None:
+            library_template_paths[id] = template_path
 
         layouts_info = [
             {"index": i, "name": layout.name}
