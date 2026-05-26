@@ -283,16 +283,26 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         ),
     )
     def save_presentation_to_url(presentation_id: Optional[str] = None) -> Dict:
-        """Save the presentation to S3 and return a presigned download URL.
+        """Save the presentation to S3 and return a download URL.
 
         Replaces the upstream `save_presentation(file_path, ...)` tool. The
-        model no longer chooses a filesystem path; the server serializes the
-        in-memory deck to an S3 object and returns a short-lived download
-        URL the caller can share with the end user.
+        server serializes the in-memory deck to S3 and returns a plain
+        `https://s3.<region>.amazonaws.com/<bucket>/<key>` URL. The bucket
+        policy grants public-read on the `pptx/` prefix; the object key
+        uses a UUIDv4 suffix (~2^122 entropy) so the URL is effectively
+        unguessable, and a 7-day S3 lifecycle bounds exposure.
 
-        Configuration via env vars (Lambda task role provides AWS creds):
+        We intentionally do **not** return a SigV4 presigned URL here:
+        when those URLs travel through markdown-rendered chat surfaces,
+        the `%2F` percent-encoding in the X-Amz-Security-Token can get
+        decoded along the way, corrupting the base64 token and causing
+        S3 to reject the request with "InvalidToken". A plain URL has no
+        query-string signature to mangle.
+
+        Configuration via env vars:
           - PPTX_OUTPUT_BUCKET (required)
-          - PRESIGNED_URL_TTL_SECONDS (optional, default 1800)
+          - AWS_REGION (set automatically in Lambda; local-dev fallback
+            is AWS_DEFAULT_REGION).
         """
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
 
@@ -307,10 +317,9 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                 "error": "PPTX_OUTPUT_BUCKET env var is not set on the MCP server."
             }
 
-        try:
-            ttl = int(os.environ.get("PRESIGNED_URL_TTL_SECONDS", "1800"))
-        except ValueError:
-            ttl = 1800
+        region = os.environ.get("AWS_REGION") or os.environ.get(
+            "AWS_DEFAULT_REGION"
+        ) or "us-east-1"
 
         try:
             buffer = io.BytesIO()
@@ -330,16 +339,13 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                 ),
             )
 
-            url = client.generate_presigned_url(
-                ClientMethod="get_object",
-                Params={"Bucket": bucket, "Key": key},
-                ExpiresIn=ttl,
-            )
+            # Plain public-read URL. The bucket policy (defined in CDK)
+            # allows `s3:GetObject` on `pptx/*` from any principal.
+            url = f"https://s3.{region}.amazonaws.com/{bucket}/{key}"
 
             return {
                 "message": "Presentation uploaded.",
                 "download_url": url,
-                "expires_in_seconds": ttl,
                 "s3_key": key,
             }
         except Exception as e:
