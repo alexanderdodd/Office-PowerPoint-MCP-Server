@@ -21,15 +21,21 @@ def _strip_template_slides(pres) -> int:
     """Remove every slide from a Presentation while keeping the slide
     masters and layouts (which carry the brand styling) intact.
 
-    Returns the number of slides removed. The underlying slide parts
-    remain in the package as orphans — PowerPoint ignores them at
-    render time, which is fine for our case and avoids the deeper
-    relationship-graph surgery that a true delete would require.
+    Drops both the slide ID entry from sldIdLst and the corresponding
+    relationship on the presentation part, so PowerPoint's strict
+    validator doesn't surface "this file has problems, do you want to
+    repair it?" on open. (Just removing from sldIdLst leaves orphan
+    rels behind, which is what PowerPoint complains about.)
+
+    Returns the number of slides removed.
     """
     xml_slides = pres.slides._sldIdLst
+    slide_entries = list(xml_slides)
     removed = 0
-    for slide_id in list(xml_slides):
-        xml_slides.remove(slide_id)
+    for slide_entry in slide_entries:
+        rId = slide_entry.rId
+        pres.part.drop_rel(rId)
+        xml_slides.remove(slide_entry)
         removed += 1
     return removed
 
