@@ -455,6 +455,16 @@ def _serve_http(port: int) -> None:
     """
     import uvicorn
 
+    # Relocate FastMCP's HTTP mount point when running behind an API
+    # Gateway / reverse proxy that forwards the full resource path. AWS
+    # API Gateway + Lambda Web Adapter forwards `/v1/mcp/pptx` verbatim;
+    # if FastMCP stays at the upstream default `/mcp` the route 404s.
+    # Defaults to `/mcp` so local docker runs behave identically to
+    # upstream.
+    mount_path = os.environ.get("PPTX_MOUNT_PATH")
+    if mount_path:
+        app.settings.streamable_http_path = mount_path
+
     expected_token = _resolve_auth_token()
     starlette_app = app.streamable_http_app()
 
