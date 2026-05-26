@@ -3,10 +3,26 @@ Presentation management tools for PowerPoint MCP Server.
 Handles presentation creation, opening, saving, and core properties.
 """
 from typing import Dict, List, Optional, Any
+import io
 import os
+import uuid
+from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import utils as ppt_utils
+
+# Bizzdesign fork: lazy boto3 import so local stdio/HTTP runs (without AWS
+# credentials) don't fail at module load. The S3 upload tool only imports
+# when invoked.
+_S3_CLIENT = None
+
+
+def _get_s3_client():
+    global _S3_CLIENT
+    if _S3_CLIENT is None:
+        import boto3
+        _S3_CLIENT = boto3.client("s3")
+    return _S3_CLIENT
 
 
 def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, get_template_search_directories):
@@ -120,30 +136,73 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
     @app.tool(
         annotations=ToolAnnotations(
-            title="Save Presentation",
-            destructiveHint=True,
+            title="Save Presentation To Download URL",
+            destructiveHint=False,
         ),
     )
-    def save_presentation(file_path: str, presentation_id: Optional[str] = None) -> Dict:
-        """Save a presentation to a file."""
-        # Use the specified presentation or the current one
+    def save_presentation_to_url(presentation_id: Optional[str] = None) -> Dict:
+        """Save the presentation to S3 and return a presigned download URL.
+
+        Replaces the upstream `save_presentation(file_path, ...)` tool. The
+        model no longer chooses a filesystem path; the server serializes the
+        in-memory deck to an S3 object and returns a short-lived download
+        URL the caller can share with the end user.
+
+        Configuration via env vars (Lambda task role provides AWS creds):
+          - PPTX_OUTPUT_BUCKET (required)
+          - PRESIGNED_URL_TTL_SECONDS (optional, default 1800)
+        """
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
-        
+
         if pres_id is None or pres_id not in presentations:
             return {
                 "error": "No presentation is currently loaded or the specified ID is invalid"
             }
-        
-        # Save the presentation
-        try:
-            saved_path = ppt_utils.save_presentation(presentations[pres_id], file_path)
+
+        bucket = os.environ.get("PPTX_OUTPUT_BUCKET")
+        if not bucket:
             return {
-                "message": f"Presentation saved to {saved_path}",
-                "file_path": saved_path
+                "error": "PPTX_OUTPUT_BUCKET env var is not set on the MCP server."
+            }
+
+        try:
+            ttl = int(os.environ.get("PRESIGNED_URL_TTL_SECONDS", "1800"))
+        except ValueError:
+            ttl = 1800
+
+        try:
+            buffer = io.BytesIO()
+            presentations[pres_id].save(buffer)
+            buffer.seek(0)
+
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            key = f"pptx/{timestamp}-{uuid.uuid4()}.pptx"
+
+            client = _get_s3_client()
+            client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=buffer.getvalue(),
+                ContentType=(
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                ),
+            )
+
+            url = client.generate_presigned_url(
+                ClientMethod="get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=ttl,
+            )
+
+            return {
+                "message": "Presentation uploaded.",
+                "download_url": url,
+                "expires_in_seconds": ttl,
+                "s3_key": key,
             }
         except Exception as e:
             return {
-                "error": f"Failed to save presentation: {str(e)}"
+                "error": f"Failed to upload presentation: {str(e)}"
             }
 
     @app.tool(
