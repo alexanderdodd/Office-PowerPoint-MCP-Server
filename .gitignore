@@ -12,3 +12,7 @@ wheels/
 test/
 .DS_Store
 CLAUDE.md
+
+# Bizzdesign fork: templates/ holds private .pptx files baked into the
+# container image at build time. They live in private ECR, not GitHub.
+templates/

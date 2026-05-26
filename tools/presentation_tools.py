@@ -54,6 +54,51 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
     @app.tool(
         annotations=ToolAnnotations(
+            title="List Bundled Template Files",
+            readOnlyHint=True,
+        ),
+    )
+    def list_template_files() -> Dict:
+        """List `.pptx` / `.potx` template files bundled with the server.
+
+        Bizzdesign fork: the container image ships brand template decks
+        baked into `/app/templates`. Operators add new templates by
+        copying them into that directory at build time. The returned
+        `filename` values can be passed directly to
+        `create_presentation_from_template`.
+
+        For purely layout templates (no .pptx file), see
+        `list_slide_templates` which returns the JSON layouts.
+        """
+        search_dirs = get_template_search_directories()
+        templates: List[Dict[str, str]] = []
+        seen = set()
+        for directory in search_dirs:
+            if not os.path.isdir(directory):
+                continue
+            for filename in sorted(os.listdir(directory)):
+                if not filename.lower().endswith(('.pptx', '.potx')):
+                    continue
+                if filename in seen:
+                    continue
+                seen.add(filename)
+                full_path = os.path.join(directory, filename)
+                try:
+                    size_bytes = os.path.getsize(full_path)
+                except OSError:
+                    size_bytes = 0
+                templates.append({
+                    "filename": filename,
+                    "directory": directory,
+                    "size_bytes": size_bytes,
+                })
+        return {
+            "templates": templates,
+            "search_directories": search_dirs,
+        }
+
+    @app.tool(
+        annotations=ToolAnnotations(
             title="Create Presentation from Template",
         ),
     )
