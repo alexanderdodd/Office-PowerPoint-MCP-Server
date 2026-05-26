@@ -5,8 +5,10 @@ Consolidated version with 20 tools organized into multiple modules.
 """
 import os
 import argparse
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 # import utils  # Currently unused
 from tools import (
@@ -402,26 +404,83 @@ def get_server_info() -> Dict:
         ]
     }
 
+# ---- Auth Middleware (Bizzdesign fork) ----
+#
+# Wraps FastMCP's Starlette app with a bearer-token check so this server
+# can run as a standalone, externally-callable MCP service. The shared
+# token is sourced from one of:
+#   1. `PPTX_AUTH_TOKEN` env var (raw string — handy for local docker runs).
+#   2. `PPTX_AUTH_TOKEN_SECRET_ARN` env var (AWS Secrets Manager ARN — the
+#      Lambda task role provides creds via boto3's default chain at cold
+#      start).
+#   3. Neither set → open mode, request is forwarded without an auth check.
+#      A noisy startup log line warns about this so it's obvious in logs.
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Reject any request whose `Authorization` header doesn't carry the
+    expected `Bearer <token>` value. The token is held in-memory after
+    cold-start; rotation requires a Lambda redeploy or container restart.
+    """
+
+    def __init__(self, app, expected_token: str):
+        super().__init__(app)
+        self.expected_token = expected_token
+
+    async def dispatch(self, request, call_next):
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self.expected_token:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
+def _resolve_auth_token() -> Optional[str]:
+    direct = os.environ.get("PPTX_AUTH_TOKEN")
+    if direct:
+        return direct
+    secret_arn = os.environ.get("PPTX_AUTH_TOKEN_SECRET_ARN")
+    if not secret_arn:
+        return None
+    # Lazy boto3 import keeps local stdio runs from paying the boto3
+    # cost when the env var isn't set.
+    import boto3
+    client = boto3.client("secretsmanager")
+    return client.get_secret_value(SecretId=secret_arn)["SecretString"]
+
+
+def _serve_http(port: int) -> None:
+    """Serve FastMCP over streamable HTTP with optional bearer-token auth.
+
+    Diverges from upstream's `app.run(transport='streamable-http')` so we
+    can mount a Starlette middleware in front of FastMCP's ASGI app.
+    """
+    import uvicorn
+
+    expected_token = _resolve_auth_token()
+    starlette_app = app.streamable_http_app()
+
+    if expected_token:
+        starlette_app.add_middleware(
+            BearerAuthMiddleware,
+            expected_token=expected_token,
+        )
+        print("[ppt-mcp] bearer-token auth enabled", flush=True)
+    else:
+        print(
+            "[ppt-mcp] WARNING: PPTX_AUTH_TOKEN / PPTX_AUTH_TOKEN_SECRET_ARN unset, running open",
+            flush=True,
+        )
+
+    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+
+
 # ---- Main Function ----
 def main(transport: str = "stdio", port: int = 8000):
     if transport == "http":
-        import asyncio
-        # Set the port for HTTP transport
-        app.settings.port = port
-        # Start the FastMCP server with HTTP transport
-        try:
-            app.run(transport='streamable-http')
-        except asyncio.exceptions.CancelledError:
-            print("Server stopped by user.")
-        except KeyboardInterrupt:
-            print("Server stopped by user.")
-        except Exception as e:
-            print(f"Error starting server: {e}")
-            
+        _serve_http(port)
     elif transport == "sse":
         # Run the FastMCP server in SSE (Server Side Events) mode
         app.run(transport='sse')
-        
+
     else:
         # Run the FastMCP server
         app.run(transport='stdio')
