@@ -110,14 +110,27 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
         presentations[id] = pres
 
+        # Surface the slide layouts so the model knows which layout_index
+        # to pass to `add_slide` for each slide type. Without this info
+        # the model picks layout indices blindly and the resulting deck
+        # doesn't reflect the template's brand styling.
+        layouts_info = [
+            {"index": i, "name": layout.name}
+            for i, layout in enumerate(pres.slide_layouts)
+        ]
+
         result: Dict[str, Any] = {
             "presentation_id": id,
             "slide_count": len(pres.slides),
+            "layouts": layouts_info,
         }
         if resolved_template_path is not None:
             result["message"] = (
                 f"Created presentation '{id}' from bundled template "
-                f"'{resolved_template_path}'."
+                f"'{resolved_template_path}'. Use `add_slide(layout_index=...)` "
+                f"with one of the listed layouts to preserve brand styling. "
+                f"Prefer modifying existing template slides over deleting "
+                f"them — the example slides demonstrate the look and feel."
             )
             result["template_path"] = resolved_template_path
         else:
@@ -210,12 +223,22 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         # Store the presentation
         presentations[id] = pres
         
+        layouts_info = [
+            {"index": i, "name": layout.name}
+            for i, layout in enumerate(pres.slide_layouts)
+        ]
+
         return {
             "presentation_id": id,
-            "message": f"Created new presentation from template '{template_path}' with ID: {id}",
+            "message": (
+                f"Created new presentation from template '{template_path}' with ID: {id}. "
+                "Use `add_slide(layout_index=...)` with one of the listed layouts to "
+                "preserve brand styling. Prefer modifying existing template slides over "
+                "deleting them — the example slides demonstrate the look and feel."
+            ),
             "template_path": template_path,
             "slide_count": len(pres.slides),
-            "layout_count": len(pres.slide_layouts)
+            "layouts": layouts_info,
         }
 
     @app.tool(

@@ -28,7 +28,22 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
         color_scheme: str = "modern_blue",
         presentation_id: Optional[str] = None
     ) -> Dict:
-        """Add a new slide to the presentation with optional background styling."""
+        """Add a new slide to the presentation with optional background styling.
+
+        IMPORTANT FOR BRAND TEMPLATES: layouts are template-specific. When
+        the presentation was created from a `.pptx` template (see
+        `create_presentation` and `create_presentation_from_template`,
+        which return a `layouts` array), pick the `layout_index` whose
+        name matches the slide's role (e.g. a "Cover Slide" layout for
+        the title slide, a "Basic Text" layout for content slides, a
+        "Divider" layout for section breaks). The default
+        `layout_index=1` is rarely the right choice for a branded deck.
+
+        To use the layout's title placeholder (so the title is styled by
+        the template), pass `title` here rather than calling
+        `add_text_box` afterwards — the latter overlays a plain text box
+        on top of the styled placeholder.
+        """
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
         
         if pres_id is None or pres_id not in presentations:
