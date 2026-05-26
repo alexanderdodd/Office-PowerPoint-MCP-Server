@@ -292,13 +292,6 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         uses a UUIDv4 suffix (~2^122 entropy) so the URL is effectively
         unguessable, and a 7-day S3 lifecycle bounds exposure.
 
-        We intentionally do **not** return a SigV4 presigned URL here:
-        when those URLs travel through markdown-rendered chat surfaces,
-        the `%2F` percent-encoding in the X-Amz-Security-Token can get
-        decoded along the way, corrupting the base64 token and causing
-        S3 to reject the request with "InvalidToken". A plain URL has no
-        query-string signature to mangle.
-
         Configuration via env vars:
           - PPTX_OUTPUT_BUCKET (required)
           - AWS_REGION (set automatically in Lambda; local-dev fallback
