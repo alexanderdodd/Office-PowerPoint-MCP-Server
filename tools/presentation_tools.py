@@ -17,6 +17,23 @@ import utils as ppt_utils
 _S3_CLIENT = None
 
 
+def _strip_template_slides(pres) -> int:
+    """Remove every slide from a Presentation while keeping the slide
+    masters and layouts (which carry the brand styling) intact.
+
+    Returns the number of slides removed. The underlying slide parts
+    remain in the package as orphans — PowerPoint ignores them at
+    render time, which is fine for our case and avoids the deeper
+    relationship-graph surgery that a true delete would require.
+    """
+    xml_slides = pres.slides._sldIdLst
+    removed = 0
+    for slide_id in list(xml_slides):
+        xml_slides.remove(slide_id)
+        removed += 1
+    return removed
+
+
 def _get_s3_client():
     global _S3_CLIENT
     if _S3_CLIENT is None:
@@ -53,14 +70,25 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             title="Create Presentation",
         ),
     )
-    def create_presentation(id: Optional[str] = None, blank: bool = False) -> Dict:
+    def create_presentation(
+        id: Optional[str] = None,
+        blank: bool = False,
+        include_template_slides: bool = False,
+    ) -> Dict:
         """Create a new PowerPoint presentation.
 
         Bizzdesign fork: when the `PPTX_DEFAULT_TEMPLATE` env var is set
         on the server, this tool seeds the new presentation from that
-        bundled template by default so every deck inherits brand styling
-        and master layouts without the caller having to remember to pick
-        a template. Pass `blank=True` to opt out and get an empty deck.
+        bundled template by default — the slide masters and slide
+        layouts (which carry the brand styling) are imported, but the
+        template's example slides are stripped so the assistant starts
+        with a clean 0-slide deck and adds new slides using the
+        branded layouts via `add_slide(layout_index=...)`.
+
+        Pass `blank=True` to opt out entirely (no template imported).
+        Pass `include_template_slides=True` to keep the template's
+        example slides as the starting point (useful if you want to
+        modify existing content in place).
 
         If the env-var template can't be found in the configured search
         directories, the tool falls back to a blank presentation rather
@@ -92,9 +120,12 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                     "blank presentation instead."
                 )
 
+        stripped_slide_count = 0
         if resolved_template_path is not None:
             try:
                 pres = ppt_utils.create_presentation_from_template(resolved_template_path)
+                if not include_template_slides:
+                    stripped_slide_count = _strip_template_slides(pres)
             except Exception as e:
                 pres = ppt_utils.create_presentation()
                 template_warning = (
@@ -125,13 +156,23 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             "layouts": layouts_info,
         }
         if resolved_template_path is not None:
-            result["message"] = (
-                f"Created presentation '{id}' from bundled template "
-                f"'{resolved_template_path}'. Use `add_slide(layout_index=...)` "
-                f"with one of the listed layouts to preserve brand styling. "
-                f"Prefer modifying existing template slides over deleting "
-                f"them — the example slides demonstrate the look and feel."
-            )
+            if stripped_slide_count:
+                result["message"] = (
+                    f"Created presentation '{id}' from bundled template "
+                    f"'{resolved_template_path}'. Starts with 0 slides — the "
+                    f"template's {stripped_slide_count} example slides were "
+                    f"stripped, but the brand layouts (see `layouts`) and "
+                    f"slide masters are preserved. Build the deck by calling "
+                    f"`add_slide(layout_index=...)` with the layout whose "
+                    f"name matches each slide's role."
+                )
+            else:
+                result["message"] = (
+                    f"Created presentation '{id}' from bundled template "
+                    f"'{resolved_template_path}' with its {len(pres.slides)} "
+                    f"example slides retained. Modify them in place to keep "
+                    f"the brand look."
+                )
             result["template_path"] = resolved_template_path
         else:
             result["message"] = f"Created new (blank) presentation '{id}'."
@@ -189,8 +230,20 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             title="Create Presentation from Template",
         ),
     )
-    def create_presentation_from_template(template_path: str, id: Optional[str] = None) -> Dict:
-        """Create a new PowerPoint presentation from a template file."""
+    def create_presentation_from_template(
+        template_path: str,
+        id: Optional[str] = None,
+        include_template_slides: bool = False,
+    ) -> Dict:
+        """Create a new PowerPoint presentation from a template file.
+
+        By default the template's slide masters and layouts are imported
+        (carrying the brand styling) but the example slides are stripped
+        so the assistant starts with 0 slides and builds the deck using
+        `add_slide(layout_index=...)`. Pass `include_template_slides=True`
+        to keep the example slides as the starting point if you want to
+        modify existing content in place.
+        """
         # Check if template file exists
         if not os.path.exists(template_path):
             # Try to find the template by searching in configured directories
@@ -215,27 +268,42 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             return {
                 "error": f"Failed to create presentation from template: {str(e)}"
             }
-        
+
+        stripped = 0
+        if not include_template_slides:
+            stripped = _strip_template_slides(pres)
+
         # Generate an ID if not provided
         if id is None:
             id = f"presentation_{len(presentations) + 1}"
-        
+
         # Store the presentation
         presentations[id] = pres
-        
+
         layouts_info = [
             {"index": i, "name": layout.name}
             for i, layout in enumerate(pres.slide_layouts)
         ]
 
+        if stripped:
+            message = (
+                f"Created presentation '{id}' from template '{template_path}'. "
+                f"Starts with 0 slides — the template's {stripped} example slides "
+                f"were stripped, but the brand layouts (see `layouts`) and slide "
+                f"masters are preserved. Build the deck by calling "
+                f"`add_slide(layout_index=...)` with the layout whose name "
+                f"matches each slide's role."
+            )
+        else:
+            message = (
+                f"Created presentation '{id}' from template '{template_path}' "
+                f"with its {len(pres.slides)} example slides retained. Modify "
+                f"them in place to keep the brand look."
+            )
+
         return {
             "presentation_id": id,
-            "message": (
-                f"Created new presentation from template '{template_path}' with ID: {id}. "
-                "Use `add_slide(layout_index=...)` with one of the listed layouts to "
-                "preserve brand styling. Prefer modifying existing template slides over "
-                "deleting them — the example slides demonstrate the look and feel."
-            ),
+            "message": message,
             "template_path": template_path,
             "slide_count": len(pres.slides),
             "layouts": layouts_info,
