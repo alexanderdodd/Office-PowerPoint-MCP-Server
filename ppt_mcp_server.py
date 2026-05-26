@@ -465,6 +465,19 @@ def _serve_http(port: int) -> None:
     if mount_path:
         app.settings.streamable_http_path = mount_path
 
+    # FastMCP auto-enables DNS-rebinding protection with localhost-only
+    # `allowed_hosts` when its bind host is left at the 127.0.0.1 default
+    # (see mcp.server.transport_security). Behind API Gateway + LWA the
+    # forwarded `Host` header is the public domain, which the localhost
+    # allow-list rejects with 421. Disable the protection here — the
+    # bearer-token middleware below is the real auth boundary, and DNS
+    # rebinding is not in the threat model for a server-to-server MCP.
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    app.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    )
+
     expected_token = _resolve_auth_token()
     starlette_app = app.streamable_http_app()
 
