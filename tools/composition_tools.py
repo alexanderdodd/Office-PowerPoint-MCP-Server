@@ -564,6 +564,9 @@ def _clone_slide_into(working_pres, library_pres, source_index: int, strip_pictu
     return new_slide
 
 
+_RENDER_UA = "bizzdesign-pptx-mcp/0.15 (+contact a.dodd@bizzdesign.com)"
+
+
 def _fetch_diagram_png(mermaid_source: str, timeout: int = 30) -> bytes:
     """POST Mermaid source to kroki.io and return the rendered PNG bytes.
 
@@ -571,13 +574,18 @@ def _fetch_diagram_png(mermaid_source: str, timeout: int = 30) -> bytes:
     runs the official mermaid renderer server-side and returns PNG.
     POC-grade dependency — fine for sandbox, swap for self-hosted
     kroki container if/when this matters for production SLAs.
+
+    Kroki rejects the default Python urllib User-Agent — set a real one.
     """
     import urllib.request
-    import urllib.error
     req = urllib.request.Request(
         "https://kroki.io/mermaid/png",
         data=mermaid_source.encode("utf-8"),
-        headers={"Content-Type": "text/plain", "Accept": "image/png"},
+        headers={
+            "Content-Type": "text/plain",
+            "Accept": "image/png",
+            "User-Agent": _RENDER_UA,
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -603,7 +611,11 @@ def _fetch_chart_png(chart_config: Dict[str, Any], width: int = 800, height: int
     req = urllib.request.Request(
         "https://quickchart.io/chart",
         data=_json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "image/png"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "image/png",
+            "User-Agent": _RENDER_UA,
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
