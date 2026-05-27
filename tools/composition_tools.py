@@ -222,37 +222,78 @@ def _set_shape_text(shape, new_text: str) -> None:
 
 def _set_shape_multiline(shape, lines: List[str]) -> None:
     """Replace a shape's text with multiple lines (one paragraph each),
-    preserving the first paragraph's styling for every line.
+    preserving EACH ORIGINAL PARAGRAPH'S styling per-line.
+
+    The template's stat card (and similar multi-tier compositions) have
+    distinct font sizes per paragraph: huge VALUE on line 1, medium
+    LABEL on line 2, small ATTRIBUTION on line 3. Cloning the first
+    paragraph's styling onto every new line dumps the giant VALUE font
+    onto the LABEL and causes overflow.
+
+    Algorithm:
+      - For i in range(min(len(lines), len(original_paragraphs))):
+          replace the text of paragraph i, keep its run styling
+      - If new content has MORE lines than original paragraphs, clone the
+        LAST original paragraph's style for the overflow.
+      - If new content has FEWER lines, delete the extra paragraphs.
     """
     if not shape.has_text_frame or not lines:
         _set_shape_text(shape, "")
         return
-    # Normalise escape artefacts in every line.
     lines = [_normalise_text(l) for l in lines]
-    # First line goes through _set_shape_text (preserves first run styling).
-    _set_shape_text(shape, lines[0])
-    if len(lines) == 1:
-        return
     tf = shape.text_frame
-    # Clone the first paragraph for each additional line.
-    first_p = tf.paragraphs[0]._p
-    for line in lines[1:]:
-        new_p = deepcopy(first_p)
-        # Clear all run text in the clone, then set the first run's text.
-        from lxml import etree
-        a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
-        runs = new_p.findall(f"{{{a_ns}}}r")
+    original_paras = list(tf.paragraphs)
+    if not original_paras:
+        tf.text = lines[0]
+        if len(lines) > 1:
+            for line in lines[1:]:
+                p = tf.add_paragraph()
+                p.text = line
+        return
+
+    a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+    def _set_para_text_preserving_style(p_el, new_text: str) -> None:
+        """Set a paragraph's text to `new_text` while preserving the
+        styling of its first run (font, size, colour, bold, etc.)."""
+        runs = p_el.findall(f"{{{a_ns}}}r")
         if not runs:
-            new_p.text = line
-        else:
-            # Drop extra runs in the clone, leaving just the first.
-            for r in runs[1:]:
-                new_p.remove(r)
-            # Update the surviving run's <a:t>
-            t = runs[0].find(f"{{{a_ns}}}t")
-            if t is not None:
-                t.text = line
-        first_p.addnext(new_p) if False else tf._txBody.append(new_p)
+            # No <a:r> children — just set the paragraph text directly.
+            # Strip any existing inline text first.
+            for child in list(p_el):
+                if child.tag.endswith("}r") or child.tag.endswith("}br") or child.tag.endswith("}fld"):
+                    p_el.remove(child)
+            # python-pptx-style: add a single run with the text.
+            from lxml import etree
+            r = etree.SubElement(p_el, f"{{{a_ns}}}r")
+            t = etree.SubElement(r, f"{{{a_ns}}}t")
+            t.text = new_text
+            return
+        # Keep the first run (style preserved), drop the rest, update text.
+        first_run = runs[0]
+        for r in runs[1:]:
+            p_el.remove(r)
+        t = first_run.find(f"{{{a_ns}}}t")
+        if t is None:
+            from lxml import etree
+            t = etree.SubElement(first_run, f"{{{a_ns}}}t")
+        t.text = new_text
+
+    # Update existing paragraphs in place (preserves per-paragraph styling).
+    for i in range(min(len(lines), len(original_paras))):
+        _set_para_text_preserving_style(original_paras[i]._p, lines[i])
+
+    if len(lines) > len(original_paras):
+        # Clone the LAST original paragraph for any overflow lines.
+        last_p = original_paras[-1]._p
+        for extra_line in lines[len(original_paras):]:
+            new_p = deepcopy(last_p)
+            _set_para_text_preserving_style(new_p, extra_line)
+            tf._txBody.append(new_p)
+    elif len(lines) < len(original_paras):
+        # Remove extra paragraphs the new content doesn't need.
+        for extra_p in original_paras[len(lines):]:
+            extra_p._p.getparent().remove(extra_p._p)
 
 
 def _find_shape_by_match(shapes, match_prefix: str):
@@ -728,12 +769,18 @@ def register_composition_tools(
             VALUE\\nLABEL\\nATTRIBUTION
 
         - VALUE:   1-6 chars. A number or short symbol. ("60+", "$5.5M", "100%", "Q2", "3x")
-        - LABEL:   2-3 words, max 18 chars. The "what" of the number. ("Capabilities", "Annual Savings", "Ship Date")
-        - ATTRIBUTION: optional. 4-10 words, max 40 chars. Brief context. ("Across 5 platform layers", "Achieved by a UK insurer")
+        - LABEL:   1-2 words, max 14 chars. The "what" of the number. ("Capabilities", "Ship Date", "Layers")
+        - ATTRIBUTION: optional. max 32 chars. Brief context. ("Across 5 layers", "Achieved by UK insurer")
 
-        GOOD:   "60+\\nCapabilities\\nAcross 5 platform layers"
-        BAD:    "6\\nCapability pillars spanning infrastructure to user experience"   (label way too long)
-        BAD:    "Six different\\nThings\\nFor different reasons"   (value should be a number/symbol)
+        GOOD:   "60+\\nCapabilities\\nAcross 5 layers"
+        BAD:    "60+\\nCapabilities Mapped"           (LABEL 19 chars → wraps and overflows)
+        BAD:    "6\\nCapability Layers"               (LABEL 17 chars → wraps and overflows)
+        BAD:    "Six different\\nThings\\nFor reasons"  (VALUE should be a number/symbol, not words)
+
+        IF YOU GET AN OVERFLOW ERROR: rewrite shorter and retry — do NOT
+        call this tool again with different content; that creates a duplicate
+        slide. The validation runs BEFORE any slide is built; an error
+        means nothing was added to the deck.
 
         Args:
             subhead: Small kicker line at the top, max 5 words. ("By the numbers", "Today's scale", "Our impact").
