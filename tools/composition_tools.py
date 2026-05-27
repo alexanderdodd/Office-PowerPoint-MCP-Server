@@ -860,9 +860,37 @@ def register_composition_tools(
         Bizzdesign brand background with the large title centred and a
         subtitle line below.
 
+        CRITICAL: The cover slide is NOT a name-tag for the deck. It is
+        the opening claim. `title` must be a CLAIM the audience will
+        debate — a verb / number / delta / tension — NOT a topic label.
+        The deck's topic / audience / year / event goes in `subtitle`.
+
         Args:
-            title: The deck's headline (claim form, e.g. "From feature to platform").
-            subtitle: Subtitle text (audience, year, or short scope statement).
+            title: The deck's HEADLINE CLAIM (an assertion, not a topic).
+                Drop the deck's headline message here, the ONE thing the
+                audience should walk away believing. If you find yourself
+                writing a noun phrase like "2026 Economic Outlook" or
+                "Company Objectives 2026" or "LLM Integration Plan" — STOP.
+                That's the subtitle. The title is the claim that justifies
+                why the audience should sit through the deck.
+
+                Good titles (assertions):
+                  ✓ "2026 is a regime change, not a continuation"
+                  ✓ "Net retention climbs to 118% by Q4"
+                  ✓ "Three integration points, one kill-switch"
+                  ✓ "Earn the right to grow — three priorities, no fourth"
+
+                Bad titles (topic labels — go in subtitle):
+                  ✗ "2026 Economic Outlook"
+                  ✗ "Company Objectives 2026"
+                  ✗ "LLM Integration Plan"
+                  ✗ "Q1 Strategy Review"
+
+            subtitle: Audience / scope / year / event. This is where the
+                deck's TOPIC name goes (the noun-phrase). Example forms:
+                  • "Strategy & Finance Leaders · 2026 Outlook"
+                  • "All-Hands · 2026 Company Objectives"
+                  • "Architecture Review Board · Q1 2026"
         """
         return _build_composition("cover", {"title": title, "subtitle": subtitle}, presentation_id)
 
