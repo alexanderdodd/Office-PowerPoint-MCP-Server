@@ -72,8 +72,8 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
     },
     "solution_detail": {
         "source_slide_index": 13,
-        "description": "The workhorse: category kicker + offering title + benefits paragraph + 3 detail items.",
-        "use_when": "Any substantial topic with 3 detail items and a benefits summary. Use for each priority phase or each platform pillar in a roadmap deck.",
+        "description": "Category kicker + offering title + benefits paragraph + EXACTLY 3 detail items.",
+        "use_when": "A specific named topic that has exactly 3 named sub-features AND a 'why this matters' summary. NOT for generic 3-item lists — for those use `add_bullets_slide`. NOT for high-level claims — for those use `add_value_props_slide`. Don't use this composition more than 3 times in a row.",
         "fields": {
             "category": {"match": "Transformation Planning", "required": True},
             "title": {"match": "Strategic Portfolio Management", "required": True},
@@ -81,8 +81,64 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
             "details": [
                 {"match": "Business Strategy Alignment"},
                 {"match": "IT Investment Optimization"},
-                {"match": "Strategic"},  # matches "Strategic Roadmapping" (and others — see locator)
+                {"match": "Strategic"},
             ],
+        },
+    },
+    "stat_cards": {
+        "source_slide_index": 10,  # slide 11
+        "description": "Subhead + intro line + 4 big-number stat cards (each: value, label, attribution).",
+        "use_when": "When you have 3-4 NUMBERS that tell the story (revenue, customer counts, time savings, capability counts, team counts, dates). Numbers make decks land — pick this composition any time the content has stats. Each stat is one string: 'VALUE\\nLABEL\\nATTRIBUTION' (e.g. '60+\\nCapabilities\\nAcross 5 platform layers').",
+        "fields": {
+            "subhead": {"match": "Our Impact", "required": True},
+            "intro": {"match": "See how customers", "required": True},
+            "stats": [
+                {"match": "£4.35M"},  # £4.35M
+                {"match": "66%"},
+                {"match": "$5.5M"},
+                {"match": "15%"},
+            ],
+        },
+    },
+    "capability_grid": {
+        "source_slide_index": 12,  # slide 13
+        "description": "Section subhead + cross-cutting label + intro + 3 column headings + 9 capability cards in a 3x3 grid (each: heading + description).",
+        "use_when": "When the content is a MAP of many capabilities organised into 3 columns, with multiple sub-items per column. Perfect for 'the platform at a glance' or 'all the layers and what's in each'. Each card is 'HEADING\\nDescription text'. If you have fewer than 3 cards per column, the unused slots are blanked.",
+        "fields": {
+            "subhead": {"match": "Bizzdesign", "required": True},
+            "cross_label": {"match": "Transformation Collaboration", "required": True},
+            "cross_intro": {"match": "Align teams around", "required": True},
+            "col_headings": [
+                {"match": "Transformation Planning"},
+                {"match": "Transformation Design"},
+                {"match": "Transformation Governance"},
+            ],
+            # 9 cards: 3 per column, ordered by column then by vertical position
+            "cards": [
+                {"match": "Strategic Portfolio Management"},
+                {"match": "Application Portfolio Management"},
+                {"match": "Technology Portfolio Management"},
+                {"match": "Enterprise Architecture Management"},
+                {"match": "Business Architecture Management"},
+                {"match": "Solution Architecture Management"},
+                {"match": "Business Process Management"},
+                {"match": "Data Management"},
+                {"match": "Governance, Risk & Compliance"},
+            ],
+        },
+    },
+    "bullets": {
+        # Special: built directly from the Basic Text layout, not cloned
+        # from a source slide. The Basic Text layout has placeholder idx 13
+        # (subhead) and idx 14 (body bullets, brand-styled).
+        "source_slide_index": None,
+        "layout_name": "Basic Text",
+        "description": "Title + small subhead + brand-styled bullet list.",
+        "use_when": "Short list of items WITHOUT sub-detail (3-6 bullets, ≤ 15 words each). Use for asks / takeaways / quick lists / agenda items. Reach for this BEFORE solution_detail when the content is just a list, not a 'topic with 3 features'.",
+        "fields": {
+            "title": "layout_title",
+            "subhead": "placeholder_idx_13",
+            "bullets": "placeholder_idx_14",
         },
     },
 }
@@ -308,6 +364,57 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
 
 
 # ------------------------------------------------------------------
+# Layout-built compositions (no source slide clone)
+# ------------------------------------------------------------------
+
+def _apply_layout_fields(slide, content: Dict[str, Any]) -> List[str]:
+    """Populate a layout-built slide (Basic Text) with title + subhead + bullets.
+
+    Currently only used by the `bullets` composition. The Basic Text
+    layout has the title placeholder, a subhead at idx 13, and a body
+    placeholder at idx 14 (brand bullets baked in).
+    """
+    warnings: List[str] = []
+    title_text = content.get("title")
+    if title_text:
+        if slide.shapes.title is not None:
+            slide.shapes.title.text = str(title_text)
+        else:
+            warnings.append("No title placeholder on this layout")
+
+    subhead_text = content.get("subhead")
+    if subhead_text is not None:
+        ph_13 = None
+        for ph in slide.placeholders:
+            if ph.placeholder_format.idx == 13:
+                ph_13 = ph
+                break
+        if ph_13 is not None:
+            ph_13.text_frame.text = str(subhead_text)
+        else:
+            warnings.append("No placeholder idx 13 (subhead) on this layout")
+
+    bullets = content.get("bullets")
+    if bullets:
+        if isinstance(bullets, str):
+            bullets = [bullets]
+        ph_14 = None
+        for ph in slide.placeholders:
+            if ph.placeholder_format.idx == 14:
+                ph_14 = ph
+                break
+        if ph_14 is None:
+            warnings.append("No placeholder idx 14 (body) on this layout")
+        else:
+            tf = ph_14.text_frame
+            tf.text = str(bullets[0])
+            for bullet in bullets[1:]:
+                p = tf.add_paragraph()
+                p.text = str(bullet)
+    return warnings
+
+
+# ------------------------------------------------------------------
 # Library cache
 # ------------------------------------------------------------------
 # We need a fresh Presentation instance per working deck (so the model's
@@ -367,8 +474,23 @@ def register_composition_tools(
 
         source_idx = comp["source_slide_index"]
         try:
-            new_slide = _clone_slide_into(working, library, source_idx)
-            warnings = _apply_fields(new_slide, comp["fields"], content)
+            if source_idx is None:
+                # Layout-built composition (currently just `bullets`).
+                # Find the named layout in the working presentation and add
+                # a fresh slide, then populate title + subhead + bullets via
+                # the layout's placeholders directly.
+                layout_name = comp.get("layout_name")
+                layout = next(
+                    (l for l in working.slide_layouts if l.name == layout_name),
+                    None,
+                )
+                if layout is None:
+                    return {"error": f"Layout {layout_name!r} not found in working presentation."}
+                new_slide = working.slides.add_slide(layout)
+                warnings = _apply_layout_fields(new_slide, content)
+            else:
+                new_slide = _clone_slide_into(working, library, source_idx)
+                warnings = _apply_fields(new_slide, comp["fields"], content)
         except Exception as e:
             return {"error": f"Failed to build {composition_name}: {e}"}
 
@@ -521,5 +643,103 @@ def register_composition_tools(
         return _build_composition(
             "solution_detail",
             {"category": category, "title": title, "benefits": benefits, "details": details},
+            presentation_id,
+        )
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Bullets Slide"),
+    )
+    def add_bullets_slide(
+        title: str,
+        subhead: str,
+        bullets: List[str],
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a clean title + subhead + brand-styled bullet list slide.
+
+        Reach for this BEFORE `add_solution_detail_slide` when the content
+        is a simple LIST without sub-features per item. The brand styling
+        on the bullets comes from the Basic Text layout's body
+        placeholder — bullet glyphs, font, and indentation are all
+        template-driven.
+
+        Args:
+            title: Slide title (claim form, e.g. "Three things we need from leadership").
+            subhead: Small kicker line above the bullets (e.g. "NEXT STEPS" or "WHAT YOU CAN DO").
+            bullets: List of 3-6 short bullets (≤ 15 words each, parallel grammar).
+        """
+        return _build_composition(
+            "bullets",
+            {"title": title, "subhead": subhead, "bullets": bullets},
+            presentation_id,
+        )
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Stat Cards Slide"),
+    )
+    def add_stat_cards_slide(
+        subhead: str,
+        intro: str,
+        stats: List[str],
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a slide with 4 big-number stat cards.
+
+        Numbers make decks land. Reach for this any time the content has
+        stats — capabilities counts, team counts, customer counts, time
+        savings, revenue numbers, dates, milestones.
+
+        Args:
+            subhead: Small kicker line at the top (e.g. "By the numbers", "Our impact", "Today").
+            intro: One-line intro sentence above the stat cards.
+            stats: List of 3 or 4 stats. Each stat is a single string with
+                three lines: "VALUE\\nLABEL\\nATTRIBUTION". E.g.
+                "60+\\nCapabilities\\nAcross 5 platform layers".
+                If you supply fewer than 4, unused slots are blanked.
+        """
+        return _build_composition(
+            "stat_cards",
+            {"subhead": subhead, "intro": intro, "stats": stats},
+            presentation_id,
+        )
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Capability Grid Slide"),
+    )
+    def add_capability_grid_slide(
+        subhead: str,
+        cross_label: str,
+        cross_intro: str,
+        col_headings: List[str],
+        cards: List[str],
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a 3-column × 3-row grid of capability cards.
+
+        Use this for "the whole platform at a glance" slides — when the
+        content is a MAP of many capabilities organised into 3 categories
+        with multiple sub-items per category. 9 cards total, distributed
+        as 3 cards per column in the order you supply them.
+
+        Args:
+            subhead: Top-of-slide subhead (e.g. "Platform map", "All Capabilities").
+            cross_label: Cross-cutting label that spans the top center
+                (e.g. "Powered by Unify", "Across every surface").
+            cross_intro: Intro paragraph framing the grid.
+            col_headings: List of 3 column headings (e.g. ["Core Platform", "App-Wide Assistant", "Eval & Observability"]).
+            cards: List of up to 9 cards. Each card is a string formatted
+                as "HEADING\\nDescription text". Cards fill column 1 first
+                (top to bottom), then column 2, then column 3. Unused
+                slots are blanked.
+        """
+        return _build_composition(
+            "capability_grid",
+            {
+                "subhead": subhead,
+                "cross_label": cross_label,
+                "cross_intro": cross_intro,
+                "col_headings": col_headings,
+                "cards": cards,
+            },
             presentation_id,
         )
