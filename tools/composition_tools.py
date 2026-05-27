@@ -99,6 +99,15 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
                 {"match": "15%"},
             ],
         },
+        # Post-process tightening: the 40pt VALUE paragraph reserves a
+        # ~44pt line-box even for single-digit glyphs like "6". This
+        # registers as a visible gap between VALUE and LABEL. Compress
+        # the line spacing on the first paragraph of each stat shape so
+        # short values sit closer to their label.
+        "tighten_first_paragraph_line_spacing": {
+            "shape_prefixes": ["£4.35M", "66%", "$5.5M", "15%"],
+            "spc_pct": 80000,  # 80%
+        },
     },
     "capability_grid": {
         "source_slide_index": 12,  # slide 13
@@ -543,6 +552,68 @@ def _clear_starting_with(slide, prefixes: List[str]) -> None:
             _clear_shape_text(shape)
 
 
+def _tighten_first_paragraph_line_spacing(slide, spec: Dict[str, Any]) -> None:
+    """Compress the line-height on the FIRST paragraph of shapes that
+    were originally located by `spec["shape_prefixes"]`. Used to close
+    the visible gap between large VALUE paragraphs and the smaller
+    LABEL/ATTRIBUTION paragraphs that follow them in stat-card shapes.
+
+    `spec` shape (composition metadata):
+        {"shape_prefixes": [...], "spc_pct": 80000}  # 80% line spacing
+    """
+    from lxml import etree
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    shapes = list(slide.shapes)
+    pct_val = int(spec.get("spc_pct", 90000))
+    # NOTE: by the time this runs, the shapes have NEW text (the user's
+    # content) — they no longer start with the source-slide prefix.
+    # Instead, find the shapes whose ORIGINAL prefix would have located
+    # them, by walking ALL shapes and matching the new value at the same
+    # position. Simpler: just walk all shapes the composition cares
+    # about by re-running _find_shape_by_match, but since text changed,
+    # we instead apply to ALL shapes that have a multi-paragraph text
+    # frame where p0 is much larger than p1 (heuristic).
+    for shape in shapes:
+        if not shape.has_text_frame:
+            continue
+        tf = shape.text_frame
+        paragraphs = list(tf.paragraphs)
+        if len(paragraphs) < 2:
+            continue
+        # Get first-run font sizes of p0 and p1.
+        p0_runs = paragraphs[0]._p.findall(f"{{{A_NS}}}r")
+        p1_runs = paragraphs[1]._p.findall(f"{{{A_NS}}}r")
+        if not p0_runs or not p1_runs:
+            continue
+        p0_rPr = p0_runs[0].find(f"{{{A_NS}}}rPr")
+        p1_rPr = p1_runs[0].find(f"{{{A_NS}}}rPr")
+        if p0_rPr is None or p1_rPr is None:
+            continue
+        p0_sz = p0_rPr.get("sz")
+        p1_sz = p1_rPr.get("sz")
+        if p0_sz is None or p1_sz is None:
+            continue
+        # Apply tightening when p0 font is at least 2× p1 font (heuristic
+        # for "this is a big-value paragraph above small-label paragraphs").
+        if int(p0_sz) < 2 * int(p1_sz):
+            continue
+        # Add/replace <a:lnSpc><a:spcPct val="80000"/></a:lnSpc> on p0's pPr.
+        p_el = paragraphs[0]._p
+        pPr = p_el.find(f"{{{A_NS}}}pPr")
+        if pPr is None:
+            pPr = etree.SubElement(p_el, f"{{{A_NS}}}pPr")
+            p_el.remove(pPr)
+            p_el.insert(0, pPr)
+        # Remove existing lnSpc if any.
+        for existing in pPr.findall(f"{{{A_NS}}}lnSpc"):
+            pPr.remove(existing)
+        # lnSpc must be the first child of pPr per OOXML schema.
+        lnSpc = etree.Element(f"{{{A_NS}}}lnSpc")
+        spcPct = etree.SubElement(lnSpc, f"{{{A_NS}}}spcPct")
+        spcPct.set("val", str(pct_val))
+        pPr.insert(0, lnSpc)
+
+
 # ------------------------------------------------------------------
 # Layout-built compositions (no source slide clone)
 # ------------------------------------------------------------------
@@ -706,6 +777,9 @@ def register_composition_tools(
                 clear_prefixes = comp.get("clear_text_starting_with")
                 if clear_prefixes:
                     _clear_starting_with(new_slide, clear_prefixes)
+                tighten = comp.get("tighten_first_paragraph_line_spacing")
+                if tighten:
+                    _tighten_first_paragraph_line_spacing(new_slide, tighten)
         except Exception as e:
             return {"error": f"Failed to build {composition_name}: {e}"}
 
