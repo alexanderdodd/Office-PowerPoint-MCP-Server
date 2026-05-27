@@ -168,6 +168,15 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
             ],
         },
     },
+    "split_benefits": {
+        "source_slide_index": 25,  # slide 26 (0-indexed) — "Optimize and Reinforce your Operations"
+        "description": "Split layout: large brand title (left), 4-6 short benefit lines over a stock background image (right).",
+        "use_when": "When you want to land a benefit list visually — the right-hand stock background gives the slide weight. Best for 'here's what you get' / 'why this matters' moments mid-deck. The title is a verb-led claim about the section; benefits are 4-6 short outcome statements (5-12 words each).",
+        "fields": {
+            "title": {"match": "Optimize and Reinforce", "required": True},
+            "benefits": {"match": "Achieve 360", "required": True},
+        },
+    },
     "closing": {
         "source_slide_index": 36,  # slide 37 (0-indexed) — "Thank You" + CTA list
         "description": "Final 'Thank you' slide with title + 2–6 short CTA / contact lines.",
@@ -1103,6 +1112,80 @@ def register_composition_tools(
             title: Section title (claim form).
         """
         return _build_composition("section_divider", {"kicker": kicker, "title": title}, presentation_id)
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Split Benefits Slide"),
+    )
+    def add_split_benefits_slide(
+        title: str,
+        benefits: List[str],
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a split-layout benefits slide — large title on the left,
+        4-6 short benefit lines over the brand stock background on the right.
+
+        Clones the brand template's "Optimize and Reinforce your Operations"
+        slide, which is the visual workhorse for any 'here's what you get'
+        moment. The right-hand rebar/grid background image gives the slide
+        weight and prevents the text-only flatness of bullets.
+
+        Use this when:
+        - You're listing 4-6 OUTCOME statements (not bullets of action items).
+        - You want the slide to feel visually substantive without writing
+          per-card descriptions.
+        - The list is parallel — each benefit is the same shape of
+          statement (verb-led OR noun-led, pick one).
+
+        Don't use for:
+        - Lists of actions / asks → use `add_bullets_slide`.
+        - Items that need descriptions → use `add_value_cards_slide`.
+        - Capabilities organised by category → use `add_capability_grid_slide`.
+
+        Args:
+            title: Section claim, 3-8 words. Pattern: "<Verb> <noun>"
+                or "<Noun phrase>" (e.g. "Optimize operations across the
+                enterprise", "Three guardrails on every LLM call").
+            benefits: 4-6 short benefit / outcome lines, 5-12 words each.
+                Pick parallel grammar: all verb-led OR all noun-led, not
+                mixed. Examples:
+                  ["Achieve 360° insight across your digital core",
+                   "Reduce operational risk and technology costs",
+                   "Reinforce governance across the enterprise",
+                   "Accelerate transformation with automation and AI"]
+        """
+        violations: List[str] = []
+        title_text = (title or "").strip()
+        title_wc = len(title_text.split())
+        if title_wc < 3 or title_wc > 8:
+            violations.append(
+                f"title is {title_wc} words; needs 3-8. Got: {title!r}"
+            )
+        if not isinstance(benefits, list) or len(benefits) < 4 or len(benefits) > 6:
+            violations.append(
+                f"benefits must be a list of 4-6 items; got {benefits!r}"
+            )
+        else:
+            for i, line in enumerate(benefits):
+                wc = len((line or "").split())
+                if wc < 5 or wc > 12:
+                    violations.append(
+                        f"benefits[{i}] is {wc} words; needs 5-12. Got: {line!r}"
+                    )
+        if violations:
+            return {
+                "error": "split_benefits content doesn't fit the format. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite per the violations. title 3-8 words, benefits "
+                    "4-6 lines of 5-12 words each, all sharing the same "
+                    "grammatical pattern (verb-led OR noun-led, not mixed)."
+                ),
+            }
+        return _build_composition(
+            "split_benefits",
+            {"title": title, "benefits": benefits},
+            presentation_id,
+        )
 
     @app.tool(
         annotations=ToolAnnotations(title="Add Closing Slide"),
