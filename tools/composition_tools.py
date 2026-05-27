@@ -291,9 +291,12 @@ def _set_shape_multiline(shape, lines: List[str]) -> None:
             _set_para_text_preserving_style(new_p, extra_line)
             tf._txBody.append(new_p)
     elif len(lines) < len(original_paras):
-        # Remove extra paragraphs the new content doesn't need.
+        # Don't delete extra paragraphs — that would collapse the visual
+        # structure of multi-tier shapes. Clear their text instead, so
+        # leftover template lorem-ipsum doesn't show but the
+        # paragraph-level styling and spacing remain intact.
         for extra_p in original_paras[len(lines):]:
-            extra_p._p.getparent().remove(extra_p._p)
+            _set_para_text_preserving_style(extra_p._p, "")
 
 
 def _find_shape_by_match(shapes, match_prefix: str):
@@ -695,24 +698,100 @@ def register_composition_tools(
     ) -> Dict:
         """Add the workhorse "solution detail" composition.
 
-        Use this for any substantial topic with 3 detail items. The slide
-        has:
+        Use this for a substantive topic that needs 3 named sub-items
+        each with a real description. The slide has:
         - A small kicker (`category`) at the top
         - A large product/area title beneath
         - A multi-line benefits paragraph (the "why this matters")
-        - 3 detail items in a row at the bottom (each: short heading + description)
+        - 3 detail items in a row at the bottom (each: bold heading + body description)
 
-        For a roadmap or platform deck, use this for EACH phase or EACH
-        pillar — it's the brand's standard "topic detail" template.
+        IMPORTANT: this composition only EARNS its space when the
+        details have substantive descriptions. A solution_detail slide
+        with three bare headings ("Chat & Orchestration", "Skills",
+        "Data Access") and nothing else looks empty — use
+        `add_bullets_slide` for that shape instead. The composition
+        validates and rejects calls where details lack descriptions.
 
         Args:
-            category: Top-of-slide kicker (e.g. "Transformation Planning", "Now — Q2 2026").
-            title: Main heading (the topic name, ~3-5 words).
-            benefits: Multi-line benefits paragraph. Use `\\n` between lines.
-            details: List of 3 detail items, each formatted as
-                "Heading\\nDescription text spanning one or two lines". The first
-                line becomes the bold heading; subsequent lines are the body.
+            category: Top-of-slide kicker (≤ 6 words). E.g. "Layer 1 · Foundation", "Now — Q2 2026".
+            title: Main heading (≤ 10 words). The topic name.
+            benefits: Substantive paragraph (15-60 words) explaining why
+                this topic matters — what changes, what unlocks, what
+                the reader takes away. Use real newlines for paragraph
+                breaks if needed.
+            details: EXACTLY 3 detail items. Each item is a string with
+                a heading on line 1 and a description on lines 2+, e.g.
+                "Chat & Orchestration\\nPersistent conversations, interruptable
+                streams, and a routing layer that picks the right agent per
+                turn — the runtime every assistant talks through."
+                Each heading: ≤ 6 words. Each description: 12-30 words
+                (substantive, specifics-laden). Headings without
+                descriptions are REJECTED.
         """
+        # Hard validation — reject on shape violations rather than
+        # silently produce a thin slide. Matches the stat_cards pattern.
+        violations: List[str] = []
+        if len(category.split()) > 6:
+            violations.append(
+                f"category is {len(category.split())} words; max is 6. Got: {category!r}"
+            )
+        if len(title.split()) > 10:
+            violations.append(
+                f"title is {len(title.split())} words; max is 10. Got: {title!r}"
+            )
+        benefits_text = _normalise_text(benefits) if isinstance(benefits, str) else str(benefits)
+        benefits_word_count = len(benefits_text.split())
+        if benefits_word_count < 15:
+            violations.append(
+                f"benefits is only {benefits_word_count} words; needs 15-60 to "
+                f"justify this composition. Got: {benefits!r}"
+            )
+        if benefits_word_count > 60:
+            violations.append(
+                f"benefits is {benefits_word_count} words; max is 60. Got: {benefits!r}"
+            )
+        if len(details) != 3:
+            violations.append(
+                f"details must have exactly 3 items; got {len(details)}."
+            )
+        for i, item in enumerate(details[:3]):
+            normalised = _normalise_text(item) if isinstance(item, str) else str(item)
+            lines = [l.strip() for l in normalised.split("\n") if l.strip()]
+            if len(lines) < 2:
+                violations.append(
+                    f"details[{i}] needs a heading AND a description separated by "
+                    f"newline. Got just: {item!r}"
+                )
+                continue
+            heading = lines[0]
+            description = " ".join(lines[1:])
+            if len(heading.split()) > 6:
+                violations.append(
+                    f"details[{i}] heading is {len(heading.split())} words; max is 6. Got: {heading!r}"
+                )
+            description_word_count = len(description.split())
+            if description_word_count < 8:
+                violations.append(
+                    f"details[{i}] description is only {description_word_count} words; "
+                    f"needs ≥ 8 to be substantive. Got: {description!r}"
+                )
+            if description_word_count > 35:
+                violations.append(
+                    f"details[{i}] description is {description_word_count} words; max is 35. Got: {description!r}"
+                )
+        if violations:
+            return {
+                "error": "solution_detail content doesn't justify the composition. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite per the violations and retry. If you don't have "
+                    "12-30 words of real description for each detail, this is the "
+                    "wrong composition for your content — use `add_bullets_slide` "
+                    "(headings only) or `add_capability_grid_slide` (more headings, "
+                    "no per-item description) instead. solution_detail is for "
+                    "topics that DESERVE a deep slide."
+                ),
+            }
         return _build_composition(
             "solution_detail",
             {"category": category, "title": title, "benefits": benefits, "details": details},
