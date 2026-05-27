@@ -340,13 +340,29 @@ def _set_shape_multiline(shape, lines: List[str]) -> None:
             _set_para_text_preserving_style(extra_p._p, "")
 
 
-def _find_shape_by_match(shapes, match_prefix: str):
-    """Return the first shape whose text starts with the given prefix
-    (case-sensitive, stripped). None if not found.
+def _find_shape_by_match(shapes, match_prefix: str, original_texts=None, consumed=None):
+    """Return the first shape whose ORIGINAL text starts with the given
+    prefix (case-sensitive, stripped). None if not found.
+
+    `original_texts` is a dict mapping id(shape) → snapshot of the shape's
+    text before any mutation. This must be supplied when matching across
+    multiple fields in one composition, because one field's new value
+    can collide with another field's matcher prefix (e.g. cover title
+    "2026 is a regime change..." starts with "2026" and would match the
+    subtitle matcher after being applied). Falling back to the live text
+    is the legacy path used for first-match-only callers.
+
+    `consumed` is a set of id(shape) values already claimed by another
+    field in this pass — those shapes are skipped.
     """
     target = match_prefix.strip()
     for shape in shapes:
-        text = _shape_text(shape).strip()
+        if consumed is not None and id(shape) in consumed:
+            continue
+        if original_texts is not None:
+            text = original_texts.get(id(shape), "").strip()
+        else:
+            text = _shape_text(shape).strip()
         if text.startswith(target):
             return shape
     return None
@@ -472,6 +488,17 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
     """
     warnings: List[str] = []
     shapes = list(slide.shapes)
+    # Snapshot every shape's text BEFORE any mutation so the matcher
+    # binds to the template's original content. Without this, applying
+    # one field can change a shape's text in a way that makes it match
+    # a different field's prefix on the next iteration — e.g. cover
+    # title "2026 is a regime change..." starts with "2026" and was
+    # being clobbered by the subtitle matcher that also looks for "2026".
+    original_texts: Dict[int, str] = {id(s): _shape_text(s) for s in shapes}
+    consumed: set = set()
+
+    def _claim(shape):
+        consumed.add(id(shape))
 
     def _apply_text(shape, value):
         if isinstance(value, list):
@@ -487,28 +514,40 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
         # value is a string; split at the FIRST newline.
         text = _normalise_text(value) if isinstance(value, str) else str(value)
         head, _, body = text.partition("\n")
-        head_shape = _find_shape_by_match(shapes, matcher["heading_match"])
-        desc_shape = _find_shape_by_match(shapes, matcher["description_match"])
+        head_shape = _find_shape_by_match(
+            shapes, matcher["heading_match"], original_texts, consumed
+        )
+        desc_shape = _find_shape_by_match(
+            shapes, matcher["description_match"], original_texts, consumed
+        )
         if head_shape is None:
             warnings.append(
                 f"Paired matcher: heading shape not found (prefix: {matcher['heading_match']!r})"
             )
         else:
             _set_shape_text(head_shape, head)
+            _claim(head_shape)
         if desc_shape is None:
             warnings.append(
                 f"Paired matcher: description shape not found (prefix: {matcher['description_match']!r})"
             )
         else:
             _set_shape_text(desc_shape, body)
+            _claim(desc_shape)
 
     def _clear_paired(shapes, matcher):
-        head_shape = _find_shape_by_match(shapes, matcher["heading_match"])
-        desc_shape = _find_shape_by_match(shapes, matcher["description_match"])
+        head_shape = _find_shape_by_match(
+            shapes, matcher["heading_match"], original_texts, consumed
+        )
+        desc_shape = _find_shape_by_match(
+            shapes, matcher["description_match"], original_texts, consumed
+        )
         if head_shape is not None:
             _clear_shape_text(head_shape)
+            _claim(head_shape)
         if desc_shape is not None:
             _clear_shape_text(desc_shape)
+            _claim(desc_shape)
 
     for field_name, spec in fields_spec.items():
         value = content.get(field_name)
@@ -524,33 +563,42 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
                     if is_paired:
                         _apply_paired(shapes, matcher, values[i])
                     else:
-                        shape = _find_shape_by_match(shapes, matcher["match"])
+                        shape = _find_shape_by_match(
+                            shapes, matcher["match"], original_texts, consumed
+                        )
                         if shape is None:
                             warnings.append(
                                 f"Could not locate shape for {field_name}[{i}] (match prefix: {matcher['match']!r})"
                             )
                             continue
                         _apply_text(shape, values[i])
+                        _claim(shape)
                 else:
                     # User supplied fewer values than the template has slots —
                     # blank the unused shape(s).
                     if is_paired:
                         _clear_paired(shapes, matcher)
                     else:
-                        shape = _find_shape_by_match(shapes, matcher["match"])
+                        shape = _find_shape_by_match(
+                            shapes, matcher["match"], original_texts, consumed
+                        )
                         if shape is not None:
                             _clear_shape_text(shape)
+                            _claim(shape)
         else:
             # Scalar field.
             if value is None:
                 if spec.get("required", False):
                     warnings.append(f"Required field '{field_name}' missing from content")
                 continue
-            shape = _find_shape_by_match(shapes, spec["match"])
+            shape = _find_shape_by_match(
+                shapes, spec["match"], original_texts, consumed
+            )
             if shape is None:
                 warnings.append(f"Could not locate shape for '{field_name}' (match prefix: {spec['match']!r})")
                 continue
             _apply_text(shape, value)
+            _claim(shape)
 
     return warnings
 
