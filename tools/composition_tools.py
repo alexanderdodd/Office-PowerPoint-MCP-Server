@@ -788,21 +788,24 @@ def register_composition_tools(
             stats: List of 3 or 4 stats. Each follows the VALUE/LABEL/ATTRIBUTION
                 contract above. Fewer than 4 supplied → unused slots are blanked.
         """
-        # Validate field lengths and surface warnings the model can act on.
-        validation_warnings: List[str] = []
+        # Validate field lengths BEFORE building the slide. Any limit
+        # violation rejects the whole call — the model rewrites and
+        # retries with compliant content. No slide is added to the deck
+        # on rejection, so retries don't accumulate duplicates.
+        violations: List[str] = []
         if len(subhead.split()) > 5:
-            validation_warnings.append(
-                f"subhead is {len(subhead.split())} words; max is 5. Shorter is better."
+            violations.append(
+                f"subhead is {len(subhead.split())} words; max is 5. Got: {subhead!r}"
             )
         if len(intro.split()) > 12:
-            validation_warnings.append(
-                f"intro is {len(intro.split())} words; max is 12."
+            violations.append(
+                f"intro is {len(intro.split())} words; max is 12. Got: {intro!r}"
             )
         for i, stat in enumerate(stats[:4]):
             normalised = _normalise_text(stat) if isinstance(stat, str) else str(stat)
             lines = normalised.split("\n")
             if len(lines) < 2:
-                validation_warnings.append(
+                violations.append(
                     f"stats[{i}] has only {len(lines)} line(s); needs at least VALUE + LABEL "
                     f"separated by newline. Got: {stat!r}"
                 )
@@ -810,31 +813,76 @@ def register_composition_tools(
             value, label = lines[0].strip(), lines[1].strip()
             attribution = lines[2].strip() if len(lines) > 2 else ""
             if len(value) > 6:
-                validation_warnings.append(
+                violations.append(
                     f"stats[{i}] VALUE is {len(value)} chars (max 6). Got: {value!r}"
                 )
-            if len(label) > 18:
-                validation_warnings.append(
-                    f"stats[{i}] LABEL is {len(label)} chars (max 18). Got: {label!r}"
+            if len(label) > 14:
+                violations.append(
+                    f"stats[{i}] LABEL is {len(label)} chars (max 14). Got: {label!r}"
                 )
-            if attribution and len(attribution) > 40:
-                validation_warnings.append(
-                    f"stats[{i}] ATTRIBUTION is {len(attribution)} chars (max 40). Got: {attribution!r}"
+            if attribution and len(attribution) > 32:
+                violations.append(
+                    f"stats[{i}] ATTRIBUTION is {len(attribution)} chars (max 32). Got: {attribution!r}"
                 )
-        result = _build_composition(
+        if violations:
+            return {
+                "error": "Stat-card content exceeds character limits and would overflow visually. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite the offending stats with shorter wording, then call "
+                    "add_stat_cards_slide again. Examples of fits: LABEL like "
+                    "'Capabilities', 'Layers', 'Ship Date'; ATTRIBUTION like "
+                    "'Across 5 layers', 'Q2 2026 ship'. If you can't compress a "
+                    "stat without losing meaning, drop it from the stats list — "
+                    "3 sharp stats land harder than 4 wrapped ones."
+                ),
+            }
+        return _build_composition(
             "stat_cards",
             {"subhead": subhead, "intro": intro, "stats": stats},
             presentation_id,
         )
-        if validation_warnings:
-            existing = result.get("warnings", [])
-            result["warnings"] = existing + validation_warnings
-            # Add a clear actionable note so the model knows to rewrite.
-            result["action"] = (
-                "Some fields exceed the stat-card character limits and will overflow visually. "
-                "Rewrite the offending stats to fit the limits and call add_stat_cards_slide again."
-            )
-        return result
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Delete Slide", destructiveHint=True),
+    )
+    def delete_slide(
+        slide_index: int,
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Delete a single slide from the working presentation by index.
+
+        Use this to clean up duplicate or overflow slides created during
+        iteration — e.g. if you called a composition tool, got an
+        overflow error, and an earlier attempt left an unwanted slide.
+        After deletion, downstream slide indices shift down by 1.
+
+        Args:
+            slide_index: 0-based index of the slide to remove.
+        """
+        pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
+        if pres_id is None or pres_id not in presentations:
+            return {"error": "No presentation is currently loaded."}
+        pres = presentations[pres_id]
+        xml_slides = pres.slides._sldIdLst
+        slide_entries = list(xml_slides)
+        if slide_index < 0 or slide_index >= len(slide_entries):
+            return {
+                "error": (
+                    f"slide_index {slide_index} out of range. Deck has "
+                    f"{len(slide_entries)} slides (valid indices 0..{len(slide_entries) - 1})."
+                )
+            }
+        slide_entry = slide_entries[slide_index]
+        try:
+            pres.part.drop_rel(slide_entry.rId)
+            xml_slides.remove(slide_entry)
+        except Exception as e:
+            return {"error": f"Failed to delete slide {slide_index}: {e}"}
+        return {
+            "message": f"Deleted slide {slide_index}.",
+            "remaining_slide_count": len(pres.slides),
+        }
 
     @app.tool(
         annotations=ToolAnnotations(title="Add Capability Grid Slide"),
