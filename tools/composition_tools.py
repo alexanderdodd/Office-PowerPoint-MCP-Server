@@ -1640,9 +1640,44 @@ def register_composition_tools(
             violations.append(
                 f"category is {len(category.split())} words; max is 6. Got: {category!r}"
             )
-        if len(title.split()) > 10:
+        title_text = (title or "").strip()
+        title_wc_sd = len(title_text.split())
+        if title_wc_sd > 10:
             violations.append(
-                f"title is {len(title.split())} words; max is 10. Got: {title!r}"
+                f"title is {title_wc_sd} words; max is 10. Got: {title!r}"
+            )
+        if title_wc_sd < 5:
+            violations.append(
+                f"title is only {title_wc_sd} words; needs ≥ 5 to carry a claim. "
+                f"Short noun phrases ('AI-suggested model completions') don't assert. Got: {title!r}"
+            )
+        # Verb or clause-break punctuation — same shape check as cover.title.
+        # A noun phrase like "AI-suggested model completions in the canvas"
+        # fails this check; the model rewrites to "AI completions appear as
+        # users draw on the canvas" or "Canvas suggestions cut modeling time
+        # in half" — both have a verb.
+        import re as _re_sd
+        _sd_punct = any(p in title_text for p in (",", "—", "–", ":", ";", "?", "!"))
+        _sd_verb_re = (
+            r"\b(?:is|are|was|were|am|be|been|being|has|have|had|"
+            r"will|won't|would|shall|should|can|cannot|could|may|might|must|"
+            r"do|does|did|don't|doesn't|didn't|"
+            r"requires?|demands?|needs?|wants?|becomes?|contains?|appears?|happens?|"
+            r"climbs?|rises?|falls?|drops?|jumps?|grows?|shrinks?|"
+            r"beats?|wins?|loses?|takes?|gives?|holds?|drives?|cuts?|raises?|"
+            r"ships?|delivers?|lands?|launches?|builds?|breaks?|opens?|closes?|"
+            r"changes?|shifts?|moves?|signals?|marks?|matters?|"
+            r"earns?|costs?|saves?|protects?|enables?|preserves?|isolates?|"
+            r"bolts?|stops?|starts?|"
+            r"unlocks?|forces?|tightens?|loosens?|defines?|defends?)\b"
+        )
+        _sd_has_verb = _re_sd.search(_sd_verb_re, title_text, _re_sd.IGNORECASE) is not None
+        if title_text and not _sd_has_verb and not _sd_punct:
+            violations.append(
+                f"title has no verb and no clause-break punctuation — reads as a "
+                f"noun phrase, not a claim. Got: {title!r}. Rewrite as an assertion "
+                f"(a sentence with a verb, or a comma/em-dash claim), e.g. "
+                f"'X cuts Y' / 'X is Y' / 'Three Xs — one Y'."
             )
         benefits_text = _normalise_text(benefits) if isinstance(benefits, str) else str(benefits)
         benefits_word_count = len(benefits_text.split())
