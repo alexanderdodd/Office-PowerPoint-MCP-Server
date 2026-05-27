@@ -1477,9 +1477,31 @@ def register_composition_tools(
             violations.append(
                 f"subhead is {len(subhead.split())} words; max is 5. Got: {subhead!r}"
             )
-        if len(intro.split()) > 12:
+        intro_text = (intro or "").strip()
+        intro_wc = len(intro_text.split())
+        if intro_wc > 12:
             violations.append(
-                f"intro is {len(intro.split())} words; max is 12. Got: {intro!r}"
+                f"intro is {intro_wc} words; max is 12. Got: {intro!r}"
+            )
+        if intro_wc < 7:
+            violations.append(
+                f"intro is only {intro_wc} words; needs ≥ 7 to carry a claim "
+                f"about what the stats SHOW. A short noun phrase like 'Four data "
+                f"points...' is a topic label, not the slide's headline. Got: {intro!r}"
+            )
+        # Require clause-break punctuation in the intro. Topic-shaped
+        # noun phrases ("Five data points that define the regime") fail
+        # this check and force the model to write a multi-clause claim
+        # ("Growth slows, inflation persists, rate cuts delayed").
+        intro_has_clause_punct = any(p in intro_text for p in (",", "—", "–", ":", ";", "?", "!"))
+        if intro_text and not intro_has_clause_punct:
+            violations.append(
+                f"intro has no clause-break punctuation (comma / em-dash / colon). "
+                f"Stat-card intros must be a claim sentence, not a topic noun "
+                f"phrase. Got: {intro!r}. Rewrite as a multi-clause statement "
+                f"about what the stats reveal, e.g. 'Growth slows, inflation "
+                f"persists, rate cuts delayed' or 'Capex bifurcates — AI surges, "
+                f"non-tech freezes'."
             )
         for i, stat in enumerate(stats[:4]):
             normalised = _normalise_text(stat) if isinstance(stat, str) else str(stat)
