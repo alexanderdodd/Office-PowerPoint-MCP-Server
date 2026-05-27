@@ -18,27 +18,40 @@ _S3_CLIENT = None
 
 
 def _purge_orphan_slide_parts(pptx_bytes: bytes) -> bytes:
-    """Drop slide parts that are no longer referenced by `presentation.xml.rels`.
+    """Drop orphan slide parts AND template-inherited PowerPoint sections.
 
-    python-pptx's `drop_rel` removes a slide from the in-memory rel graph
-    and `sldIdLst`, but the underlying `SlidePart` object stays registered
-    on the Package. On save it's still serialised as `ppt/slides/slideN.xml`
-    even though nothing reaches it. PowerPoint's strict validator flags
-    these orphan parts on open ("this file has problems, do you want to
-    repair it?") AND the orphan slides occasionally surface in the Outline
-    pane / file recovery flow as zombie content like "Thank You" or
-    "Questions?" left over from `delete_slide` calls during build.
+    Two cleanup passes wrapped together because both bug classes hit the
+    saved zip and Office only forgives the file once:
 
-    This post-save pass:
-      1. Reads the legitimate slide target list from `presentation.xml.rels`.
-      2. Walks every `ppt/slides/slideN.xml` + matching `_rels/slideN.xml.rels`
-         in the zip and removes any whose filename isn't in the legitimate set.
-      3. Strips the corresponding `<Override PartName="/ppt/slides/slideN.xml">`
-         entries from `[Content_Types].xml` so the package validator stays
-         consistent.
+    1. **Orphan slide parts.** python-pptx's `drop_rel` removes a slide
+       from the in-memory rel graph and `sldIdLst`, but the underlying
+       `SlidePart` object stays registered on the Package. On save it's
+       still serialised as `ppt/slides/slideN.xml` even though nothing
+       reaches it. PowerPoint's strict validator flags these orphan parts
+       on open ("this file has problems, do you want to repair it?") AND
+       the orphan slides occasionally surface via File Recovery as zombie
+       content like "Thank You" or "Questions?" left over from
+       `delete_slide` calls during build.
 
-    Pure zip-level rewrite — no python-pptx state involved. Returns the
-    cleaned bytes.
+    2. **Template-inherited sections.** The Bizzdesign template declares
+       seven named PowerPoint sections ("Cover", "Solutions", "Products",
+       "Support & Onboarding", "Partners", "Culture, HR, Onboarding",
+       "Thank You") under `<p:extLst><p:ext><p14:sectionLst>...`. These
+       reference the original template slide IDs that we strip on create.
+       Result in PowerPoint: empty section folders in the slide panel
+       sidebar showing the template's domain names — visually wrong and
+       a second source of the "repair this file" prompt.
+
+    Post-save passes:
+      a. Read the legitimate slide target list from `presentation.xml.rels`.
+      b. Walk every `ppt/slides/slideN.xml` + matching `_rels/slideN.xml.rels`
+         in the zip and remove any whose filename isn't in the legitimate set.
+      c. Strip corresponding `<Override PartName="/ppt/slides/slideN.xml">`
+         entries from `[Content_Types].xml`.
+      d. Strip the `<p14:sectionLst>` extension element from
+         `presentation.xml` so the slide-panel sidebar is clean.
+
+    Pure zip-level rewrite — no python-pptx state involved.
     """
     import zipfile
     import re
@@ -70,12 +83,30 @@ def _purge_orphan_slide_parts(pptx_bytes: bytes) -> bytes:
             if m and m.group(1) not in legitimate:
                 orphans.add(name)
 
-        if not orphans:
+        # Detect whether presentation.xml contains a template-inherited
+        # sectionLst that needs stripping (cheap string check — full regex
+        # only runs if the substring is present).
+        try:
+            pres_xml_raw = src.read("ppt/presentation.xml").decode("utf-8")
+        except KeyError:
+            pres_xml_raw = ""
+        has_sections = "<p14:sectionLst" in pres_xml_raw
+
+        if not orphans and not has_sections:
             return pptx_bytes
 
         # Build the override-prune set: every orphan slide's content-type
         # Override entry must come out of [Content_Types].xml too.
         override_targets = {f"/{name}" for name in orphans if slide_path_re.match(name)}
+
+        # Pattern that matches the <p:ext> wrapper containing the
+        # sectionLst (the URI is the well-known PowerPoint 2010 section
+        # extension marker). Strip the whole wrapper, not just the inner
+        # sectionLst, so we don't leave an empty <p:ext> behind.
+        section_ext_re = re.compile(
+            r'<p:ext\b[^>]*uri="\{521415D9-36F7-43E2-AB2F-B90AF26B5E84\}"[^>]*>.*?</p:ext>',
+            re.DOTALL,
+        )
 
         out_buf = BytesIO()
         with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as dst:
@@ -92,6 +123,10 @@ def _purge_orphan_slide_parts(pptx_bytes: bytes) -> bytes:
                             "",
                             text,
                         )
+                    data = text.encode("utf-8")
+                elif name == "ppt/presentation.xml" and has_sections:
+                    text = data.decode("utf-8")
+                    text = section_ext_re.sub("", text)
                     data = text.encode("utf-8")
                 dst.writestr(name, data)
         return out_buf.getvalue()
