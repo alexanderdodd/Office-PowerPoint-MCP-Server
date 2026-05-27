@@ -892,6 +892,44 @@ def register_composition_tools(
                   • "All-Hands · 2026 Company Objectives"
                   • "Architecture Review Board · Q1 2026"
         """
+        # Hard validation — the model otherwise defaults to topic-label
+        # cover titles ("2026 Economic Outlook", "Company Objectives 2026")
+        # no matter how strongly the skill or this docstring push the
+        # opposite. Refuse on shape violation so the model must retry
+        # with an actual claim.
+        title_text = (title or "").strip()
+        violations: List[str] = []
+        word_count = len(title_text.split())
+        if word_count < 5:
+            violations.append(
+                f"title is {word_count} words; cover titles must be ≥ 5 words to "
+                f"carry a claim. A short noun phrase like {title!r} is a topic "
+                f"label, not an assertion. Move it to `subtitle` and put your "
+                f"brief's headline message in `title` instead."
+            )
+        # Reject the "Year + Topic" pattern: starts with a 4-digit year
+        # followed by ≤ 4 more words and no verb-indicator punctuation.
+        import re
+        year_topic = re.match(r"^\s*(19|20)\d{2}\b", title_text)
+        has_clause_punct = any(p in title_text for p in (",", "—", "–", ":", "?", "!"))
+        if year_topic and word_count <= 6 and not has_clause_punct:
+            violations.append(
+                f"title looks like a 'Year + Topic' label: {title!r}. The cover "
+                f"title should be a claim. The year/event/audience goes in "
+                f"`subtitle`. Example: title='2026 is a regime change, not a "
+                f"continuation' subtitle='2026 Outlook · Strategy & Finance'."
+            )
+        if violations:
+            return {
+                "error": "Cover title is a topic label, not a claim. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite the title as an ASSERTION (a verb / number / delta / "
+                    "tension — the ONE thing the audience should walk away "
+                    "believing) and move the topic noun-phrase to `subtitle`. "
+                    "Use the brief's headline_message verbatim if it fits."
+                ),
+            }
         return _build_composition("cover", {"title": title, "subtitle": subtitle}, presentation_id)
 
     @app.tool(
