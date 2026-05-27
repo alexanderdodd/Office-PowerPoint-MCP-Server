@@ -273,12 +273,20 @@ def _shape_text(shape) -> str:
     return "".join(parts)
 
 
+_UNICODE_ESCAPE_RE = __import__("re").compile(r"\\u([0-9A-Fa-f]{4})")
+
+
 def _normalise_text(s: str) -> str:
     """Normalise common LLM escape artefacts in incoming text.
 
     - Two-char literal `\\n` / `\\t` → real newline / tab (models sometimes
       pass these escape sequences when they think they're producing
       JSON-escaped strings).
+    - Literal `\\uXXXX` escape sequences → the corresponding Unicode
+      codepoint. Models occasionally double-escape special chars like
+      em-dash ("\\u2014") in tool args, which arrives at the server as
+      a 6-char literal string instead of the intended single character.
+      Decode them here so rendered slides show "—" not "\\u2014".
     - Multiple consecutive newlines collapse to a single newline (extra
       blank lines in stat cards / multi-tier shapes render as visible
       blank paragraphs and break the layout).
@@ -287,6 +295,7 @@ def _normalise_text(s: str) -> str:
     if not isinstance(s, str):
         return s
     s = s.replace("\\n", "\n").replace("\\t", "\t")
+    s = _UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), s)
     # Collapse runs of \n\n+ (and \n \n etc.) to single \n. Trim per-line
     # whitespace so " \n " also collapses cleanly.
     parts = [p.strip() for p in s.split("\n")]
@@ -1061,7 +1070,7 @@ def _apply_layout_fields(slide, content: Dict[str, Any]) -> List[str]:
     title_text = content.get("title")
     if title_text:
         if slide.shapes.title is not None:
-            slide.shapes.title.text = str(title_text)
+            slide.shapes.title.text = _normalise_text(str(title_text))
             _rename_shape(slide.shapes.title, "title")
         else:
             warnings.append("No title placeholder on this layout")
@@ -1807,7 +1816,7 @@ def register_composition_tools(
         # the full slide width so 8-12 word titles fit on a single line
         # instead of wrapping into the body region.
         if new_slide.shapes.title is not None:
-            new_slide.shapes.title.text = title
+            new_slide.shapes.title.text = _normalise_text(title)
             _rename_shape(new_slide.shapes.title, "title")
             _widen_title_full_width(new_slide, working)
 
