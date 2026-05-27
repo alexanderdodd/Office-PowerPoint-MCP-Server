@@ -987,11 +987,17 @@ def register_composition_tools(
         Args:
             title: The deck's HEADLINE CLAIM (an assertion, not a topic).
                 Drop the deck's headline message here, the ONE thing the
-                audience should walk away believing. If you find yourself
-                writing a noun phrase like "2026 Economic Outlook" or
-                "Company Objectives 2026" or "LLM Integration Plan" — STOP.
-                That's the subtitle. The title is the claim that justifies
-                why the audience should sit through the deck.
+                audience should walk away believing. **Length: 7-16 words.**
+                Shorter is a topic label; longer overflows the title shape
+                and renders unreadably small. If your brief's
+                headline_message exceeds 16 words, compress it to its
+                sharpest single sentence — move the longer rationale to
+                slide 2 (a solution_detail or bullets slide).
+                If you find yourself writing a noun phrase like
+                "2026 Economic Outlook" or "Company Objectives 2026" or
+                "LLM Integration Plan" — STOP. That's the subtitle. The
+                title is the claim that justifies why the audience should
+                sit through the deck.
 
                 Good titles (assertions):
                   ✓ "2026 is a regime change, not a continuation"
@@ -1030,6 +1036,14 @@ def register_composition_tools(
                 f"must be ≥ 7 words to carry a claim — anything shorter is a "
                 f"topic label. Got: {title!r}. Move it to `subtitle` and put "
                 f"your brief's headline message in `title` instead."
+            )
+        if word_count > 16:
+            violations.append(
+                f"title is {word_count} words. Cover titles must be ≤ 16 words — "
+                f"longer ones overflow the title shape and the rendered text "
+                f"shrinks to be unreadable. Got: {title!r}. Compress the claim "
+                f"to its sharpest form (single sentence, one comma at most) and "
+                f"move the longer-form rationale to slide 2."
             )
         # An assertion has at least one verb-indicator OR a clause-break
         # punctuation mark. Topic labels typically have neither.
@@ -1573,7 +1587,8 @@ def register_composition_tools(
             title: Main slide claim, ≤ 8 words.
             intro: One-line intro paragraph framing the steps, 8-18 words.
             steps: EXACTLY 4 items. Each is "Name\\nShort description".
-                Name ≤ 3 words. Description 8-18 words.
+                Name ≤ 3 words. Description 5-12 words (the step box is
+                small — longer descriptions get cut off at the bottom).
         """
         violations: List[str] = []
         if len(subhead.split()) > 4:
@@ -1599,9 +1614,11 @@ def register_composition_tools(
             if len(name.split()) > 3:
                 violations.append(f"steps[{i}] name is {len(name.split())} words; max 3. Got: {name!r}")
             dw = len(description.split())
-            if dw < 8 or dw > 18:
+            if dw < 5 or dw > 12:
                 violations.append(
-                    f"steps[{i}] description is {dw} words; needs 8-18. Got: {description!r}"
+                    f"steps[{i}] description is {dw} words; needs 5-12. "
+                    f"Each step box is small and longer text overflows the rectangle "
+                    f"(the 'validated' / 'reforecasted' get cut off). Got: {description!r}"
                 )
         if violations:
             return {
