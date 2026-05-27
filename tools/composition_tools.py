@@ -971,6 +971,181 @@ def register_composition_tools(
 
     @app.tool(
         annotations=ToolAnnotations(
+            title="Validate Deck",
+            readOnlyHint=True,
+        ),
+    )
+    def validate_deck(
+        headline_message: Optional[str] = None,
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Run deck-level deterministic quality probes on the working
+        presentation. Returns pass/fail per probe with actionable
+        rewrite hints for any failures.
+
+        Call this AFTER building the deck and BEFORE
+        `save_presentation_to_url`. If any probe fails, use
+        `delete_slide` + the appropriate composition tool to fix the
+        specific slide indices reported, then re-validate before saving.
+
+        Probes run:
+        - `deck-has-closing-slide`: last slide must be `composition:closing`
+        - `composition-variety-min-4-distinct`: 7+ slide decks need ≥ 4 distinct
+          compositions in the body (excluding cover + closing)
+        - `composition-no-streak-over-2`: no composition repeats > 2 times in a row
+        - `title-ladder`: if `headline_message` is supplied, cover must
+          reference ≥ 40% of its key terms and body slides ≥ 60% collectively
+
+        Args:
+            headline_message: Optional — the brief's ONE-line headline message.
+                When supplied, enables the title-ladder probe. Skip if you don't
+                have a stable headline (some kickoff decks don't).
+        """
+        import re
+        pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
+        if pres_id is None or pres_id not in presentations:
+            return {"error": "No presentation is currently loaded."}
+        pres = presentations[pres_id]
+        slides = list(pres.slides)
+        P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
+        def slide_composition(slide):
+            csld = slide.element.find(f"{{{P_NS}}}cSld")
+            if csld is None:
+                return None
+            name = csld.get("name") or ""
+            return name[len("composition:"):] if name.startswith("composition:") else None
+
+        compositions = [slide_composition(s) for s in slides]
+        probe_results = []
+
+        # Deck-has-closing-slide.
+        last_comp = compositions[-1] if compositions else None
+        probe_results.append({
+            "name": "deck-has-closing-slide",
+            "passed": last_comp == "closing",
+            "detail": None if last_comp == "closing" else (
+                f"Last slide is `{last_comp}` (slide index {len(slides) - 1}). "
+                f"Every deck must end with add_closing_slide."
+            ),
+            "fix_hint": None if last_comp == "closing" else (
+                "Call add_closing_slide(title='Thank You' or a deck-specific "
+                "wrap-up, cta_lines=[…]) — it'll append as the new last slide."
+            ),
+        })
+
+        if len(slides) >= 7:
+            body = compositions[1:-1]
+            distinct = set(c for c in body if c)
+            probe_results.append({
+                "name": "composition-variety-min-4-distinct",
+                "passed": len(distinct) >= 4,
+                "detail": None if len(distinct) >= 4 else (
+                    f"Body has only {len(distinct)} distinct compositions: "
+                    f"{sorted(distinct)}. A {len(slides)}-slide deck needs ≥ 4."
+                ),
+                "fix_hint": None if len(distinct) >= 4 else (
+                    "Swap one of the repeated compositions for a different one. "
+                    "Reach for bullets, stat_cards, value_cards, split_benefits, "
+                    "or capability_grid depending on the slide's content."
+                ),
+            })
+            longest_streak = 1
+            streak_comp = body[0] if body else None
+            streak_start = 1
+            current_start = 1
+            current_streak = 1
+            for i in range(1, len(body)):
+                if body[i] == body[i - 1] and body[i] is not None:
+                    current_streak += 1
+                    if current_streak > longest_streak:
+                        longest_streak = current_streak
+                        streak_comp = body[i]
+                        streak_start = current_start + 1  # +1 because body[0] is slide index 1
+                else:
+                    current_start = i + 1
+                    current_streak = 1
+            streak_end = streak_start + longest_streak - 1
+            probe_results.append({
+                "name": "composition-no-streak-over-2",
+                "passed": longest_streak <= 2,
+                "detail": None if longest_streak <= 2 else (
+                    f"`{streak_comp}` repeats {longest_streak} times in a row "
+                    f"(slides {streak_start} through {streak_end}). Vary the rhythm."
+                ),
+                "fix_hint": None if longest_streak <= 2 else (
+                    f"Delete one of the streaked slides (e.g. delete_slide({streak_end - 1})) "
+                    f"and re-add the same content with a different composition. "
+                    f"If content is the same SHAPE, try the suggested swap in the "
+                    f"list_compositions() catalogue."
+                ),
+            })
+
+        # Title-ladder.
+        if headline_message and len(slides) >= 3:
+            stopwords = {
+                'a', 'an', 'the', 'and', 'or', 'but', 'is', 'are', 'was', 'were',
+                'be', 'been', 'being', 'to', 'of', 'in', 'on', 'at', 'for', 'with',
+                'by', 'from', 'as', 'that', 'this', 'these', 'those', 'it', 'its',
+                'we', 'our', 'us', 'you', 'your', 'their', 'they', 'them',
+                'have', 'has', 'had', 'will', 'would', 'should', 'can', 'could',
+                'may', 'might', 'must', 'do', 'does', 'did', 'not', 'no',
+                'than', 'then', 'now', 'so', 'if', 'when', 'where', 'who',
+                'what', 'how', 'why', 'one', 'two', 'three', 'four', 'five',
+                'more', 'most', 'less', 'each', 'into', 'about',
+            }
+            def key_terms(text):
+                return {
+                    w for w in re.sub(r"[^a-z0-9\s%$£€]", " ", text.lower()).split()
+                    if len(w) >= 4 and w not in stopwords
+                }
+            headline_terms = key_terms(headline_message)
+            if len(headline_terms) >= 3:
+                def slide_text(slide):
+                    parts = []
+                    for shape in slide.shapes:
+                        if shape.has_text_frame:
+                            parts.append(shape.text_frame.text)
+                    return " ".join(parts)
+                cover_terms = key_terms(slide_text(slides[0]))
+                body_terms = set()
+                for s in slides[1:-1]:
+                    body_terms |= key_terms(slide_text(s))
+                cover_cov = len(cover_terms & headline_terms) / max(1, len(headline_terms))
+                body_cov = len(body_terms & headline_terms) / max(1, len(headline_terms))
+                cover_ok = cover_cov >= 0.4
+                body_ok = body_cov >= 0.6
+                missing_body = sorted(headline_terms - body_terms)
+                probe_results.append({
+                    "name": "title-ladder",
+                    "passed": cover_ok and body_ok,
+                    "detail": None if (cover_ok and body_ok) else (
+                        (f"cover covers {int(cover_cov*100)}% of headline terms (need ≥40%). " if not cover_ok else "") +
+                        (f"body covers {int(body_cov*100)}% (need ≥60%) — missing: {missing_body}." if not body_ok else "")
+                    ).strip(),
+                    "fix_hint": None if (cover_ok and body_ok) else (
+                        "Rewrite slide 0 (cover) to use more of the headline's key terms verbatim. "
+                        "And/or add or rewrite a body slide title using the missing terms."
+                    ),
+                })
+
+        failures = [p for p in probe_results if not p["passed"]]
+        return {
+            "passed": len(failures) == 0,
+            "slide_count": len(slides),
+            "probes": probe_results,
+            "failure_count": len(failures),
+            "next_step": (
+                "Deck passed all deck-level probes. Safe to call save_presentation_to_url."
+                if not failures else
+                f"{len(failures)} probe(s) failed. Address each using the `fix_hint` field "
+                "(delete_slide + replacement composition call), then call validate_deck "
+                "again before save_presentation_to_url. Do NOT save while validation is failing."
+            ),
+        }
+
+    @app.tool(
+        annotations=ToolAnnotations(
             title="List Compositions",
             readOnlyHint=True,
         ),
