@@ -455,10 +455,23 @@ def _widen_title_full_width(slide, working_pres, side_margin_in: float = 0.5) ->
     try:
         slide_w = working_pres.slide_width
         margin = Inches(side_margin_in)
-        new_left = margin
-        new_width = slide_w - 2 * margin
-        title_shape.left = new_left
-        title_shape.width = new_width
+        # Resolve current position from the placeholder's effective
+        # frame (falls back through the layout/master if the slide
+        # hasn't overridden it). We MUST set all four (left/top/width/
+        # height) — touching one writes <a:off>/<a:ext> on the slide
+        # which OVERRIDES the layout entirely; missing axes default to
+        # zero and the title slides up out of the visible area.
+        current_top = title_shape.top
+        current_height = title_shape.height
+        if current_top is None or current_height is None:
+            # Layout-fallback defaults for the Basic Text layout: title
+            # sits ~0.45in from the top and is ~1.0in tall.
+            current_top = Inches(0.45) if current_top is None else current_top
+            current_height = Inches(1.0) if current_height is None else current_height
+        title_shape.left = margin
+        title_shape.top = current_top
+        title_shape.width = slide_w - 2 * margin
+        title_shape.height = current_height
     except Exception:
         # Some title shapes refuse geometry edits (rare); fail soft so
         # the build continues with the template-default narrow title.
