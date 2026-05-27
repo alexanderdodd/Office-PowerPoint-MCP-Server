@@ -14,10 +14,12 @@ visual quality bar the brand designer set, with the model just supplying
 text.
 """
 from copy import deepcopy
+from io import BytesIO
 from typing import Any, Dict, List, Optional
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pptx import Presentation
+from pptx.util import Emu, Inches
 
 
 # ------------------------------------------------------------------
@@ -205,6 +207,23 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
             "title": {"match": "Optimize and Reinforce", "required": True},
             "benefits": {"match": "Achieve 360", "required": True},
         },
+    },
+    "diagram": {
+        # Built directly from the Basic Text layout: title placeholder
+        # at the top, body placeholder replaced with the rendered PNG.
+        "source_slide_index": None,
+        "layout_name": "Basic Text",
+        "description": "Title + a server-rendered Mermaid diagram embedded as PNG. Optional caption.",
+        "use_when": "When you need to show STRUCTURE, FLOW, or RELATIONSHIPS visually — architecture diagrams, sequence flows, org charts, decision trees, dependency graphs. Supply Mermaid source text; the server renders it and embeds the result. Don't use for static lists or bullets — those are bullets/solution_detail.",
+        # Handled by add_diagram_slide directly, not by _apply_fields.
+        "fields": {},
+    },
+    "chart": {
+        "source_slide_index": None,
+        "layout_name": "Basic Text",
+        "description": "Title + a server-rendered chart (bar / line / pie / doughnut) embedded as PNG. Optional caption.",
+        "use_when": "When you need to show QUANTITIES — revenue over time, market share split, growth comparisons, before/after metrics. Supply a Chart.js v4 config (chart_type + data); the server renders via QuickChart and embeds the result. For 4 standalone stat numbers WITHOUT axis context, prefer add_stat_cards_slide.",
+        "fields": {},
     },
     "closing": {
         "source_slide_index": 36,  # slide 37 (0-indexed) — "Thank You" + CTA list
@@ -543,6 +562,52 @@ def _clone_slide_into(working_pres, library_pres, source_index: int, strip_pictu
         new_tree.append(cloned)
 
     return new_slide
+
+
+def _fetch_diagram_png(mermaid_source: str, timeout: int = 30) -> bytes:
+    """POST Mermaid source to kroki.io and return the rendered PNG bytes.
+
+    Kroki is a free public diagram-rendering gateway. The Mermaid path
+    runs the official mermaid renderer server-side and returns PNG.
+    POC-grade dependency — fine for sandbox, swap for self-hosted
+    kroki container if/when this matters for production SLAs.
+    """
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(
+        "https://kroki.io/mermaid/png",
+        data=mermaid_source.encode("utf-8"),
+        headers={"Content-Type": "text/plain", "Accept": "image/png"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _fetch_chart_png(chart_config: Dict[str, Any], width: int = 800, height: int = 500, timeout: int = 30) -> bytes:
+    """POST a Chart.js config to quickchart.io and return the rendered PNG.
+
+    Same POC-vs-prod tradeoff as kroki — fine here, swap for self-hosted
+    quickchart later if needed.
+    """
+    import urllib.request
+    import json as _json
+    payload = {
+        "chart": chart_config,
+        "width": width,
+        "height": height,
+        "backgroundColor": "white",
+        "format": "png",
+        "version": "4",  # Chart.js v4
+    }
+    req = urllib.request.Request(
+        "https://quickchart.io/chart",
+        data=_json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "image/png"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
 
 
 def _tag_slide_with_composition(slide, composition_name: str) -> None:
@@ -1530,6 +1595,264 @@ def register_composition_tools(
             "split_benefits",
             {"title": title, "benefits": benefits},
             presentation_id,
+        )
+
+    def _add_image_slide(layout_name: str, title: str, png_bytes: bytes, caption: Optional[str], composition_name: str, presentation_id: Optional[str]) -> Dict:
+        """Shared internal helper for diagram + chart compositions.
+
+        Adds a fresh slide using the named layout, sets the title
+        placeholder, clears the body placeholder, drops the PNG centered
+        in the slide body area with proper aspect ratio, optionally adds
+        a small caption below, and tags the slide with composition_name.
+        """
+        pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
+        if pres_id is None or pres_id not in presentations:
+            return {"error": "No presentation is currently loaded."}
+        working = presentations[pres_id]
+        layout = next((l for l in working.slide_layouts if l.name == layout_name), None)
+        if layout is None:
+            return {"error": f"Layout {layout_name!r} not found in working presentation."}
+
+        new_slide = working.slides.add_slide(layout)
+
+        # Set title via the layout's title placeholder.
+        if new_slide.shapes.title is not None:
+            new_slide.shapes.title.text = title
+            _rename_shape(new_slide.shapes.title, "title")
+
+        # Clear the body placeholder (idx 14 on Basic Text) — the picture
+        # replaces it. We just blank the text; the placeholder shape
+        # remains but invisible.
+        for ph in list(new_slide.placeholders):
+            if ph.placeholder_format.idx not in (0,):  # keep title
+                try:
+                    ph.text_frame.clear()
+                except Exception:
+                    pass
+
+        # Drop the picture centered in the body region.
+        # Standard 16:9 slide is 13.333in × 7.5in (12192000 × 6858000 EMU).
+        # Reserve top ~1.3in for the title; bottom ~0.6in for caption.
+        slide_w = working.slide_width
+        slide_h = working.slide_height
+        top_reserve = Inches(1.3)
+        bottom_reserve = Inches(0.8) if caption else Inches(0.4)
+        avail_w = slide_w - Inches(1.0)  # 0.5in margin each side
+        avail_h = slide_h - top_reserve - bottom_reserve
+
+        # Probe PNG dimensions to compute aspect ratio.
+        try:
+            from PIL import Image  # Pillow is already a dep
+            with Image.open(BytesIO(png_bytes)) as im:
+                img_w, img_h = im.size
+        except Exception:
+            img_w, img_h = 800, 500  # safe fallback
+
+        img_aspect = img_w / max(img_h, 1)
+        avail_aspect = avail_w / max(avail_h, 1)
+        if img_aspect > avail_aspect:
+            picture_w = avail_w
+            picture_h = Emu(int(avail_w / img_aspect))
+        else:
+            picture_h = avail_h
+            picture_w = Emu(int(avail_h * img_aspect))
+        picture_left = Emu(int((slide_w - picture_w) / 2))
+        picture_top = top_reserve + Emu(int((avail_h - picture_h) / 2))
+
+        png_stream = BytesIO(png_bytes)
+        pic = new_slide.shapes.add_picture(png_stream, picture_left, picture_top, picture_w, picture_h)
+        _rename_shape(pic, "diagram_image" if composition_name == "diagram" else "chart_image")
+
+        # Optional caption below the picture.
+        if caption:
+            cap_top = picture_top + picture_h + Inches(0.1)
+            cap_left = Inches(0.5)
+            cap_w = slide_w - Inches(1.0)
+            cap_h = Inches(0.5)
+            cap_box = new_slide.shapes.add_textbox(cap_left, cap_top, cap_w, cap_h)
+            cap_box.text_frame.text = caption
+            for para in cap_box.text_frame.paragraphs:
+                para.alignment = 2  # CENTER
+            _rename_shape(cap_box, "caption")
+
+        _tag_slide_with_composition(new_slide, composition_name)
+
+        return {
+            "composition": composition_name,
+            "slide_index": len(working.slides) - 1,
+            "message": f"Added '{composition_name}' as slide {len(working.slides) - 1}.",
+        }
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Diagram Slide"),
+    )
+    def add_diagram_slide(
+        title: str,
+        mermaid: str,
+        caption: Optional[str] = None,
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a slide with a server-rendered Mermaid diagram.
+
+        Use this when the content is best shown as a diagram — architecture
+        layouts, sequence flows, decision trees, org charts, dependency
+        graphs. Supply the diagram in Mermaid source syntax; the server
+        renders it via kroki.io and embeds the resulting PNG into a new
+        slide using the Basic Text layout (title at top, diagram centered).
+
+        Args:
+            title: Slide title, ≤ 10 words. A claim about what the diagram
+                shows, not a topic label. ✓ "Side-car sits between modeler
+                and Bedrock" ✗ "Architecture Diagram".
+            mermaid: Mermaid source text. Supported diagram types include
+                flowchart, sequenceDiagram, classDiagram, stateDiagram,
+                erDiagram, journey, gantt, pie, mindmap. Example:
+                  "flowchart LR\\n  A[User] --> B[Modeler] --> C[Side-car]\\n  C --> D[Bedrock]"
+                Keep it focused — 3-12 nodes is the sweet spot. Diagrams
+                with 30+ nodes render unreadably small in a slide.
+            caption: Optional one-line caption below the diagram (≤ 15
+                words). Use to call out the headline reading of the
+                diagram, e.g. "Three integration points, one kill-switch".
+
+        Returns the slide_index of the new slide and a composition tag
+        of `diagram` so validate_deck + the assess loop know how to
+        score it.
+        """
+        violations: List[str] = []
+        if not title or not title.strip():
+            violations.append("title is empty")
+        elif len(title.split()) > 10:
+            violations.append(f"title is {len(title.split())} words; max is 10. Got: {title!r}")
+        if not mermaid or not mermaid.strip():
+            violations.append("mermaid source is empty")
+        elif len(mermaid) > 4000:
+            violations.append(f"mermaid source is {len(mermaid)} chars; max is 4000 (≈ a couple dozen nodes).")
+        if caption is not None and len(caption.split()) > 15:
+            violations.append(f"caption is {len(caption.split())} words; max is 15.")
+        if violations:
+            return {
+                "error": "add_diagram_slide content doesn't fit. NO slide was added.",
+                "violations": violations,
+            }
+        try:
+            png_bytes = _fetch_diagram_png(mermaid)
+        except Exception as e:
+            return {
+                "error": f"Diagram render failed via kroki.io: {e!r}",
+                "action": (
+                    "Check the mermaid source for syntax errors. Common "
+                    "issues: missing 'flowchart LR' header, unbalanced "
+                    "brackets, reserved words. Try rendering at "
+                    "https://mermaid.live/ to validate first."
+                ),
+            }
+        return _add_image_slide(
+            layout_name="Basic Text",
+            title=title,
+            png_bytes=png_bytes,
+            caption=caption,
+            composition_name="diagram",
+            presentation_id=presentation_id,
+        )
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Chart Slide"),
+    )
+    def add_chart_slide(
+        title: str,
+        chart_type: str,
+        labels: List[str],
+        datasets: List[Dict[str, Any]],
+        caption: Optional[str] = None,
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a slide with a server-rendered chart (bar, line, pie, doughnut).
+
+        Use this when the content is a quantitative comparison best shown
+        as a chart — revenue over time, market share split, before/after
+        metrics. The server posts to QuickChart (Chart.js v4) and embeds
+        the resulting PNG.
+
+        For 4 standalone stat numbers WITHOUT axis context (totals,
+        percentages, counts) prefer add_stat_cards_slide instead.
+
+        Args:
+            title: Slide title, ≤ 10 words. A claim about what the chart
+                shows. ✓ "ARR triples while burn stays flat" ✗ "ARR Chart".
+            chart_type: One of "bar", "line", "pie", "doughnut".
+            labels: x-axis labels (or category names for pie/doughnut),
+                e.g. ["FY22", "FY23", "FY24", "FY25", "FY26"].
+            datasets: One or more Chart.js dataset objects. Each is a dict
+                with at least:
+                  - label: legend entry (string, optional for single-series)
+                  - data: list of numbers, same length as labels
+                Example:
+                  [{"label": "ARR ($M)", "data": [8, 18, 31, 42, 55]}]
+                For pie/doughnut, use a single dataset; the values become
+                the slice sizes.
+            caption: Optional one-line caption (≤ 15 words).
+
+        Returns the slide_index of the new slide and composition tag `chart`.
+        """
+        violations: List[str] = []
+        if not title or not title.strip():
+            violations.append("title is empty")
+        elif len(title.split()) > 10:
+            violations.append(f"title is {len(title.split())} words; max is 10.")
+        valid_types = {"bar", "line", "pie", "doughnut"}
+        if chart_type not in valid_types:
+            violations.append(f"chart_type must be one of {sorted(valid_types)}; got {chart_type!r}")
+        if not isinstance(labels, list) or len(labels) < 2 or len(labels) > 20:
+            violations.append(f"labels must be a list of 2-20 strings; got {labels!r}")
+        if not isinstance(datasets, list) or len(datasets) < 1 or len(datasets) > 5:
+            violations.append(f"datasets must be a list of 1-5 dataset objects; got {datasets!r}")
+        else:
+            for i, ds in enumerate(datasets):
+                if not isinstance(ds, dict):
+                    violations.append(f"datasets[{i}] must be a dict")
+                    continue
+                data = ds.get("data")
+                if not isinstance(data, list) or not data:
+                    violations.append(f"datasets[{i}].data must be a non-empty list of numbers")
+                elif isinstance(labels, list) and len(data) != len(labels):
+                    violations.append(
+                        f"datasets[{i}].data has {len(data)} values but labels has {len(labels)}. They must match."
+                    )
+        if caption is not None and len(caption.split()) > 15:
+            violations.append(f"caption is {len(caption.split())} words; max is 15.")
+        if violations:
+            return {
+                "error": "add_chart_slide content doesn't fit. NO slide was added.",
+                "violations": violations,
+            }
+
+        chart_config = {
+            "type": chart_type,
+            "data": {
+                "labels": labels,
+                "datasets": datasets,
+            },
+            "options": {
+                "plugins": {
+                    "legend": {"display": len(datasets) > 1 or chart_type in ("pie", "doughnut")},
+                },
+                "responsive": False,
+            },
+        }
+        try:
+            png_bytes = _fetch_chart_png(chart_config)
+        except Exception as e:
+            return {
+                "error": f"Chart render failed via quickchart.io: {e!r}",
+                "action": "Check the chart_type, labels, and datasets for typos. Each dataset's `data` array must be the same length as `labels`.",
+            }
+        return _add_image_slide(
+            layout_name="Basic Text",
+            title=title,
+            png_bytes=png_bytes,
+            caption=caption,
+            composition_name="chart",
+            presentation_id=presentation_id,
         )
 
     @app.tool(
