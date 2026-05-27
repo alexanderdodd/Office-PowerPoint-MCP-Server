@@ -84,6 +84,13 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
                 {"match": "Strategic"},
             ],
         },
+        # Template slide 14 carries 3 product-UI screenshots of Bizzdesign
+        # Unify. Those screenshots are content-coupled — they sell the
+        # specific product feature this template slide describes. On any
+        # other deck topic ("Squad breakdown", "Architecture decisions",
+        # etc.) they show up as visually-impressive but completely off-
+        # topic dashboard images. Strip them on this composition.
+        "strip_pictures": True,
     },
     "stat_cards": {
         "source_slide_index": 10,  # slide 11
@@ -483,7 +490,7 @@ def _clone_pic_into(pic_element, src_slide, dst_slide):
     return cloned
 
 
-def _clone_slide_into(working_pres, library_pres, source_index: int):
+def _clone_slide_into(working_pres, library_pres, source_index: int, strip_pictures: bool = False):
     """Append a new slide to `working_pres` that is a deep clone of
     `library_pres.slides[source_index]`. Returns the new Slide.
 
@@ -527,6 +534,8 @@ def _clone_slide_into(working_pres, library_pres, source_index: int):
         if tag.endswith("}nvGrpSpPr") or tag.endswith("}grpSpPr"):
             continue
         if tag.endswith("}pic"):
+            if strip_pictures:
+                continue
             new_tree.append(_clone_pic_into(child, src_slide, new_slide))
             continue
         cloned = deepcopy(child)
@@ -942,7 +951,12 @@ def register_composition_tools(
                 new_slide = working.slides.add_slide(layout)
                 warnings = _apply_layout_fields(new_slide, content)
             else:
-                new_slide = _clone_slide_into(working, library, source_idx)
+                new_slide = _clone_slide_into(
+                    working,
+                    library,
+                    source_idx,
+                    strip_pictures=comp.get("strip_pictures", False),
+                )
                 warnings = _apply_fields(new_slide, comp["fields"], content)
                 # Optional defensive cleanup: blank any shapes whose text
                 # starts with one of these prefixes. Used for compositions
