@@ -903,47 +903,6 @@ def register_composition_tools(
                 )
             }
 
-        # Streak guard: refuse to add a 3rd consecutive slide of the
-        # same composition. Decks with five solution_detail slides in a
-        # row read as one note played five times — vary the rhythm.
-        # Cover/closing are exempt (they're singular by convention).
-        if composition_name not in ("cover", "closing"):
-            P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
-            existing = list(working.slides)
-            last_two_comps = []
-            for slide in existing[-2:]:
-                csld = slide.element.find(f"{{{P_NS}}}cSld")
-                if csld is None:
-                    last_two_comps.append(None)
-                    continue
-                name_attr = csld.get("name") or ""
-                if name_attr.startswith("composition:"):
-                    last_two_comps.append(name_attr[len("composition:"):])
-                else:
-                    last_two_comps.append(None)
-            if (
-                len(last_two_comps) == 2
-                and last_two_comps[0] == composition_name
-                and last_two_comps[1] == composition_name
-            ):
-                return {
-                    "error": (
-                        f"Streak guard: the last two slides are already "
-                        f"`{composition_name}`. Three of the same composition in "
-                        f"a row reads as one note played three times. Vary the "
-                        f"rhythm — for this slide reach for a DIFFERENT "
-                        f"composition that fits the same content (e.g. swap "
-                        f"`solution_detail` for `bullets`, `value_cards` for "
-                        f"`stat_cards`, etc.). NO slide was added."
-                    ),
-                    "action": (
-                        "Pick a different composition for this slide. If your "
-                        "content really demands the same composition, split it "
-                        "across two passes with a section_divider or different "
-                        "composition between them."
-                    ),
-                }
-
         source_idx = comp["source_slide_index"]
         try:
             if source_idx is None:
