@@ -1037,6 +1037,21 @@ def register_composition_tools(
         if len(slides) >= 7:
             body = compositions[1:-1]
             distinct = set(c for c in body if c)
+            # For the fix_hint, find the most over-used composition AND
+            # the slide indices that use it, so the model can pick which
+            # to swap.
+            from collections import Counter
+            comp_counts = Counter(c for c in body if c)
+            most_common = comp_counts.most_common(1)
+            most_common_comp = most_common[0][0] if most_common else None
+            most_common_indices = [
+                i + 1 for i, c in enumerate(body) if c == most_common_comp
+            ]
+            # Suggest compositions NOT yet used in the deck.
+            unused_compositions = sorted(
+                {"bullets", "stat_cards", "value_cards", "split_benefits", "capability_grid", "value_props_4", "section_divider", "timeline", "process_steps"}
+                - distinct
+            )
             probe_results.append({
                 "name": "composition-variety-min-4-distinct",
                 "passed": len(distinct) >= 4,
@@ -1045,9 +1060,13 @@ def register_composition_tools(
                     f"{sorted(distinct)}. A {len(slides)}-slide deck needs ≥ 4."
                 ),
                 "fix_hint": None if len(distinct) >= 4 else (
-                    "Swap one of the repeated compositions for a different one. "
-                    "Reach for bullets, stat_cards, value_cards, split_benefits, "
-                    "or capability_grid depending on the slide's content."
+                    f"`{most_common_comp}` is the most over-used (appears on slide indices "
+                    f"{most_common_indices}). Pick ONE of those slides, delete_slide(idx), "
+                    f"and re-add the same content using a different composition not yet in "
+                    f"the deck: {unused_compositions}. Match the new composition to the "
+                    f"slide's content shape (a list → bullets; numbers → stat_cards; "
+                    f"4 short statements → value_props_4; outcomes → split_benefits; "
+                    f"3 cols of capabilities → capability_grid)."
                 ),
             })
             longest_streak = 1
