@@ -350,12 +350,21 @@ def _set_shape_multiline(shape, lines: List[str]) -> None:
             _set_para_text_preserving_style(new_p, extra_line)
             tf._txBody.append(new_p)
     elif len(lines) < len(original_paras):
-        # Don't delete extra paragraphs — that would collapse the visual
-        # structure of multi-tier shapes. Clear their text instead, so
-        # leftover template lorem-ipsum doesn't show but the
-        # paragraph-level styling and spacing remain intact.
+        # Delete extra paragraphs from the txBody when the user supplies
+        # fewer lines than the template had. Previously we cleared the
+        # text (set to "") which preserved styling but left visible blank
+        # lines at the bottom of the rendered shape — caught by the
+        # composition-variety probe added in iter 16 (closing.cta_lines
+        # had 2 trailing blanks). Deleting the `<a:p>` element entirely
+        # removes the blank-line artifact.
+        #
+        # Safety: each composition call is a fresh slide — we never need
+        # to "restore" the deleted paragraphs later. Multi-tier shapes
+        # like stat_cards always receive all their paragraphs (the
+        # composition tool's validator enforces VALUE + LABEL minimum)
+        # so this won't accidentally collapse them.
         for extra_p in original_paras[len(lines):]:
-            _set_para_text_preserving_style(extra_p._p, "")
+            extra_p._p.getparent().remove(extra_p._p)
 
 
 def _rename_shape(shape, role: str) -> None:
