@@ -897,27 +897,47 @@ def register_composition_tools(
         # no matter how strongly the skill or this docstring push the
         # opposite. Refuse on shape violation so the model must retry
         # with an actual claim.
+        import re
         title_text = (title or "").strip()
         violations: List[str] = []
-        word_count = len(title_text.split())
-        if word_count < 5:
+        # Strip out non-word separators (·, |, &, /) before counting so
+        # decorative joiners don't pad the word count.
+        content_only = re.sub(r"[·|&/]+", " ", title_text)
+        content_words = [w for w in content_only.split() if w]
+        word_count = len(content_words)
+        if word_count < 7:
             violations.append(
-                f"title is {word_count} words; cover titles must be ≥ 5 words to "
-                f"carry a claim. A short noun phrase like {title!r} is a topic "
-                f"label, not an assertion. Move it to `subtitle` and put your "
-                f"brief's headline message in `title` instead."
+                f"title carries only {word_count} content words. Cover titles "
+                f"must be ≥ 7 words to carry a claim — anything shorter is a "
+                f"topic label. Got: {title!r}. Move it to `subtitle` and put "
+                f"your brief's headline message in `title` instead."
             )
-        # Reject the "Year + Topic" pattern: starts with a 4-digit year
-        # followed by ≤ 4 more words and no verb-indicator punctuation.
-        import re
-        year_topic = re.match(r"^\s*(19|20)\d{2}\b", title_text)
+        # An assertion has at least one verb-indicator OR a clause-break
+        # punctuation mark. Topic labels typically have neither.
+        VERB_INDICATORS = (
+            r"\b(?:is|are|was|were|am|be|been|being|has|have|had|"
+            r"will|won't|would|wouldn't|shall|should|shouldn't|"
+            r"can|cannot|can't|could|couldn't|may|might|must|mustn't|"
+            r"do|does|did|don't|doesn't|didn't|"
+            r"requires?|demands?|needs?|wants?|becomes?|contains?|"
+            r"climbs?|rises?|falls?|drops?|jumps?|grows?|shrinks?|"
+            r"beats?|wins?|loses?|takes?|gives?|holds?|drives?|"
+            r"ships?|delivers?|lands?|launches?|"
+            r"changes?|shifts?|moves?|signals?|marks?|matters?|"
+            r"earns?|costs?|saves?|protects?|enables?|preserves?|"
+            r"bolts?|cuts?|raises?|builds?|breaks?|opens?|closes?|"
+            r"defends?|fights?|wins?|loses?|stops?|starts?|"
+            r"unlocks?|forces?|tightens?|loosens?|denies?|admits?)\b"
+        )
+        has_verb = re.search(VERB_INDICATORS, title_text, re.IGNORECASE) is not None
         has_clause_punct = any(p in title_text for p in (",", "—", "–", ":", "?", "!"))
-        if year_topic and word_count <= 6 and not has_clause_punct:
+        if not has_verb and not has_clause_punct:
             violations.append(
-                f"title looks like a 'Year + Topic' label: {title!r}. The cover "
-                f"title should be a claim. The year/event/audience goes in "
-                f"`subtitle`. Example: title='2026 is a regime change, not a "
-                f"continuation' subtitle='2026 Outlook · Strategy & Finance'."
+                f"title has no verb and no clause-break punctuation — looks "
+                f"like a noun-phrase label, not a claim. Got: {title!r}. "
+                f"Rewrite as an assertion (a sentence with a verb, or a "
+                f"comma/em-dash claim) e.g. 'X is Y' / 'X drives Y' / "
+                f"'Three Xs — one Y'."
             )
         if violations:
             return {
