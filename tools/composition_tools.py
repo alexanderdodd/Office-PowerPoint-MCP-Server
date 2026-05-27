@@ -2092,16 +2092,23 @@ def register_composition_tools(
         title_text = (title or "").strip()
         if not title_text:
             violations.append("title is empty")
-        elif len(title_text.split()) > 8:
+        elif len(title_text.split()) > 6:
+            # Tightened from 8 → 6 in iter 40 after the platform-rearch
+            # closing slide rendered an 8-word title across THREE lines and
+            # overflowed the title shape (the template title font is ~80pt
+            # and the shape only fits ~5 words per line). 6-word cap gives
+            # the model one wrap and still reads as a clean closer.
             violations.append(
                 f"title is {len(title_text.split())} words; closing titles must "
-                f"be ≤ 8 words to fit the title shape without wrapping to 3 "
-                f"lines. Got: {title!r}."
+                f"be ≤ 6 words to fit the closing layout's 80pt title font "
+                f"without wrapping past two lines. Got: {title!r}."
             )
-        elif len(title_text) > 50:
+        elif len(title_text) > 40:
             violations.append(
-                f"title is {len(title_text)} chars; closing titles must be ≤ 50 "
-                f"chars total. Got: {title!r}."
+                f"title is {len(title_text)} chars; closing titles must be ≤ 40 "
+                f"chars total (tightened from 50 in iter 40 — long-word titles "
+                f"like 'Kafka ships week 6 — #platform-rearch' overflow even "
+                f"under the 8-word cap). Got: {title!r}."
             )
         if not isinstance(cta_lines, list) or len(cta_lines) < 2:
             violations.append(
@@ -2113,18 +2120,33 @@ def register_composition_tools(
             )
         else:
             for i, line in enumerate(cta_lines):
-                wc = len((line or "").split())
-                if wc < 4 or wc > 20:
+                line_text = (line or "").strip()
+                wc = len(line_text.split())
+                cc = len(line_text)
+                if wc < 4 or wc > 12:
+                    # Tightened max from 20 → 12 in iter 40. The closing
+                    # template splits cta_lines into two narrow columns;
+                    # anything > 12 words wraps to 3+ lines and the right
+                    # edge truncates against the column boundary.
                     violations.append(
-                        f"cta_lines[{i}] is {wc} words; needs 4-20. Got: {line!r}"
+                        f"cta_lines[{i}] is {wc} words; needs 4-12 to fit the "
+                        f"narrow CTA columns without right-edge truncation. "
+                        f"Got: {line!r}"
+                    )
+                elif cc > 70:
+                    violations.append(
+                        f"cta_lines[{i}] is {cc} chars; closing CTAs must be "
+                        f"≤ 70 chars to fit the column width without truncation. "
+                        f"Got: {line!r}"
                     )
         if violations:
             return {
                 "error": "closing slide content doesn't fit the format. NO slide was added.",
                 "violations": violations,
                 "action": (
-                    "Rewrite per the violations. title is the final claim (≤10 words). "
-                    "cta_lines are 2-6 short action/contact lines (4-20 words each)."
+                    "Rewrite per the violations. title is the final claim "
+                    "(≤ 6 words AND ≤ 40 chars). cta_lines are 2-6 short action/"
+                    "contact lines (4-12 words AND ≤ 70 chars each)."
                 ),
             }
         # Render cta_lines as newline-joined string so _set_shape_multiline
