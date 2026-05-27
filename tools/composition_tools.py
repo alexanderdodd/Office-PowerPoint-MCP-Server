@@ -131,7 +131,9 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
     "bullets": {
         # Special: built directly from the Basic Text layout, not cloned
         # from a source slide. The Basic Text layout has placeholder idx 13
-        # (subhead) and idx 14 (body bullets, brand-styled).
+        # (subhead) and idx 14 (body bullets). The layout sets <a:buNone/>
+        # on the body — we override per-paragraph with explicit buChar so
+        # bullets actually render.
         "source_slide_index": None,
         "layout_name": "Basic Text",
         "description": "Title + small subhead + brand-styled bullet list.",
@@ -141,6 +143,41 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
             "subhead": "placeholder_idx_13",
             "bullets": "placeholder_idx_14",
         },
+    },
+    "process_steps": {
+        "source_slide_index": 27,  # slide 28 (0-indexed)
+        "description": "Subhead + title + intro paragraph + 4 sequential steps in a horizontal flow (with arrows between).",
+        "use_when": "When the content is a SEQUENCE of 4 stages or steps (onboarding flow, project phases, journey stages). Each step is `Name\\nShort description`. Use for any chronological or workflow narrative. Don't use for parallel concepts — that's `value_cards` or `value_props_4`.",
+        "fields": {
+            "subhead": {"match": "Customer Onboarding", "required": True},
+            "title_and_intro": {"match": "Hit the Ground Running", "required": True},
+            "steps": [
+                {"match": "Kick-Off"},
+                {"match": "Set-Up"},
+                {"match": "Support"},
+                {"match": "Stay Connected"},
+            ],
+        },
+    },
+    "value_cards": {
+        "source_slide_index": 29,  # slide 30 (0-indexed)
+        "description": "Subhead + title + 4 icon-topped cards, each with a heading and rich description.",
+        "use_when": "When you want to showcase 4 parallel benefits / value props / pillars WITH rich descriptions (~12-25 words each). The 4 cards are visually distinct (each with an icon on top) — strong payoff slide. Differs from value_props_4 (short pillar text only) by allowing real descriptions per card. Differs from capability_grid (smaller cards, more of them) by being more visual / impactful.",
+        "fields": {
+            "subhead": {"match": "Why Partner with", "required": True},
+            "title": {"match": "Accelerate customer impact", "required": True},
+            "cards": [
+                {"match": "Expand your footprint"},
+                {"match": "Build Long-Term Sticky Relationships"},
+                {"match": "Continuous Innovation Advantage"},
+                {"match": "Successful"},  # "Successful | Implementations | End to End..."
+            ],
+        },
+        # Card 1's heading is in a SEPARATE shape ("Footprint", TextBox 29) —
+        # cards 2-4 have heading+description combined in one shape. Clearing
+        # the standalone heading shape so card 1's new content (which goes
+        # entirely into TextBox 21) doesn't conflict with the leftover.
+        "clear_text_starting_with": ["Footprint"],
     },
 }
 
@@ -554,7 +591,35 @@ def _apply_layout_fields(slide, content: Dict[str, Any]) -> List[str]:
             for bullet in bullets[1:]:
                 p = tf.add_paragraph()
                 p.text = str(bullet)
+            # The Basic Text layout sets <a:buNone/> on the body
+            # placeholder — paragraphs inherit "no bullet" and render
+            # as plain paragraphs. Override per-paragraph with explicit
+            # <a:buChar char="•"/> so bullets actually appear.
+            _force_bullet_glyphs(ph_14.text_frame)
     return warnings
+
+
+def _force_bullet_glyphs(text_frame, char: str = "•") -> None:
+    """Add an explicit <a:buChar char="•"/> to every paragraph's <a:pPr>,
+    overriding any inherited <a:buNone/>.
+    """
+    from lxml import etree
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    for p in text_frame.paragraphs:
+        p_el = p._p
+        pPr = p_el.find(f"{{{A_NS}}}pPr")
+        if pPr is None:
+            pPr = etree.SubElement(p_el, f"{{{A_NS}}}pPr")
+            # pPr must be the first child of <a:p>
+            p_el.remove(pPr)
+            p_el.insert(0, pPr)
+        # Remove any inherited bullet-suppression and existing bullet
+        # chars so our new one is authoritative.
+        for tag in ("buNone", "buChar", "buAutoNum"):
+            for el in pPr.findall(f"{{{A_NS}}}{tag}"):
+                pPr.remove(el)
+        buChar = etree.SubElement(pPr, f"{{{A_NS}}}buChar")
+        buChar.set("char", char)
 
 
 # ------------------------------------------------------------------
@@ -634,6 +699,13 @@ def register_composition_tools(
             else:
                 new_slide = _clone_slide_into(working, library, source_idx)
                 warnings = _apply_fields(new_slide, comp["fields"], content)
+                # Optional defensive cleanup: blank any shapes whose text
+                # starts with one of these prefixes. Used for compositions
+                # whose source slides have leftover heading/intro shapes
+                # the composition can't address by field.
+                clear_prefixes = comp.get("clear_text_starting_with")
+                if clear_prefixes:
+                    _clear_starting_with(new_slide, clear_prefixes)
         except Exception as e:
             return {"error": f"Failed to build {composition_name}: {e}"}
 
@@ -1112,5 +1184,149 @@ def register_composition_tools(
                 "col_headings": col_headings,
                 "cards": cards,
             },
+            presentation_id,
+        )
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Process Steps Slide"),
+    )
+    def add_process_steps_slide(
+        subhead: str,
+        title: str,
+        intro: str,
+        steps: List[str],
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a 4-step horizontal process flow with arrows between steps.
+
+        Use this for any SEQUENCE of 4 stages: onboarding, project
+        phases, customer journey, workflow steps, rollout phases.
+        Each step is a name + a short description.
+
+        Args:
+            subhead: Section label at the top, ≤ 4 words. ("Customer Onboarding", "Project Phases".)
+            title: Main slide claim, ≤ 8 words.
+            intro: One-line intro paragraph framing the steps, 8-18 words.
+            steps: EXACTLY 4 items. Each is "Name\\nShort description".
+                Name ≤ 3 words. Description 8-18 words.
+        """
+        violations: List[str] = []
+        if len(subhead.split()) > 4:
+            violations.append(f"subhead is {len(subhead.split())} words; max 4. Got: {subhead!r}")
+        if len(title.split()) > 8:
+            violations.append(f"title is {len(title.split())} words; max 8. Got: {title!r}")
+        intro_text = _normalise_text(intro) if isinstance(intro, str) else str(intro)
+        ic = len(intro_text.split())
+        if ic < 8 or ic > 18:
+            violations.append(f"intro is {ic} words; needs 8-18. Got: {intro!r}")
+        if len(steps) != 4:
+            violations.append(f"steps must have exactly 4 items; got {len(steps)}.")
+        for i, step in enumerate(steps[:4]):
+            normalised = _normalise_text(step) if isinstance(step, str) else str(step)
+            lines = [l.strip() for l in normalised.split("\n") if l.strip()]
+            if len(lines) < 2:
+                violations.append(
+                    f"steps[{i}] needs 'Name\\nDescription'. Got just: {step!r}"
+                )
+                continue
+            name = lines[0]
+            description = " ".join(lines[1:])
+            if len(name.split()) > 3:
+                violations.append(f"steps[{i}] name is {len(name.split())} words; max 3. Got: {name!r}")
+            dw = len(description.split())
+            if dw < 8 or dw > 18:
+                violations.append(
+                    f"steps[{i}] description is {dw} words; needs 8-18. Got: {description!r}"
+                )
+        if violations:
+            return {
+                "error": "process_steps content doesn't fit the step format. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite per the violations and retry. process_steps is designed "
+                    "for 4 sequential stages with tight names and short descriptions. "
+                    "If your content isn't sequential, use add_value_cards_slide "
+                    "(parallel cards) instead."
+                ),
+            }
+        # Combine title + intro into a single newline-separated string for
+        # the title_and_intro shape (which holds both as paragraphs).
+        return _build_composition(
+            "process_steps",
+            {
+                "subhead": subhead,
+                "title_and_intro": f"{title}\n{intro}",
+                "steps": steps,
+            },
+            presentation_id,
+        )
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Value Cards Slide"),
+    )
+    def add_value_cards_slide(
+        subhead: str,
+        title: str,
+        cards: List[str],
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a slide with 4 icon-topped value cards (heading + description).
+
+        High-impact composition for showcasing 4 parallel benefits with
+        real descriptions. Each card has an icon (decorative — kept from
+        the template), a heading (the value prop), and a 12-25 word
+        description (the why).
+
+        Use for:
+        - "Why work with us" type slides
+        - 4 differentiators / value props (richer than value_props_4)
+        - 4 strategic pillars
+        - 4 customer benefits
+
+        DON'T use for: capability lists (use capability_grid), sequences
+        (use process_steps), short pillar statements (use value_props_4).
+
+        Args:
+            subhead: Section label, ≤ 5 words. ("Why partner with us", "Our value props".)
+            title: Main claim, ≤ 10 words. The headline message.
+            cards: EXACTLY 4 items. Each is "Heading\\nDescription".
+                Heading ≤ 5 words. Description 12-25 words.
+        """
+        violations: List[str] = []
+        if len(subhead.split()) > 5:
+            violations.append(f"subhead is {len(subhead.split())} words; max 5. Got: {subhead!r}")
+        if len(title.split()) > 10:
+            violations.append(f"title is {len(title.split())} words; max 10. Got: {title!r}")
+        if len(cards) != 4:
+            violations.append(f"cards must have exactly 4 items; got {len(cards)}.")
+        for i, card in enumerate(cards[:4]):
+            normalised = _normalise_text(card) if isinstance(card, str) else str(card)
+            lines = [l.strip() for l in normalised.split("\n") if l.strip()]
+            if len(lines) < 2:
+                violations.append(f"cards[{i}] needs 'Heading\\nDescription'. Got just: {card!r}")
+                continue
+            heading = lines[0]
+            description = " ".join(lines[1:])
+            if len(heading.split()) > 5:
+                violations.append(f"cards[{i}] heading is {len(heading.split())} words; max 5. Got: {heading!r}")
+            dw = len(description.split())
+            if dw < 12 or dw > 25:
+                violations.append(
+                    f"cards[{i}] description is {dw} words; needs 12-25. Got: {description!r}"
+                )
+        if violations:
+            return {
+                "error": "value_cards content doesn't fit the card format. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite per the violations and retry. value_cards needs 4 cards "
+                    "with rich descriptions. If you have only short pillar statements, "
+                    "use add_value_props_slide instead. If your content needs more "
+                    "depth per card, use add_solution_detail_slide (3 cards, deeper)."
+                ),
+            }
+        return _build_composition(
+            "value_cards",
+            {"subhead": subhead, "title": title, "cards": cards},
             presentation_id,
         )
