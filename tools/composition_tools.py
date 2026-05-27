@@ -223,13 +223,20 @@ def _clone_slide_into(working_pres, library_pres, source_index: int):
         sp.getparent().remove(sp)
 
     # Deep-copy each shape from source into the new slide's shape tree.
+    # Skip:
+    #   - {nv,}GrpSpPr (group props at the top of spTree)
+    #   - <p:pic> (pictures — their <a:blip r:embed="rIdN"/> refs point to
+    #     relationships on the SOURCE slide that we don't replicate, so on
+    #     the clone they resolve to "missing image" empty boxes. Branded
+    #     text shapes carry the styling; decorative imagery is a Phase 2
+    #     concern that needs proper rel + media copying.)
     src_tree = src_slide.shapes._spTree
     new_tree = new_slide.shapes._spTree
-    p_ns = "http://schemas.openxmlformats.org/presentationml/2006/main"
     for child in list(src_tree):
         tag = child.tag
-        # Skip the nvGrpSpPr and grpSpPr at the top of spTree (group props).
         if tag.endswith("}nvGrpSpPr") or tag.endswith("}grpSpPr"):
+            continue
+        if tag.endswith("}pic"):
             continue
         new_tree.append(deepcopy(child))
 
