@@ -102,8 +102,8 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
     },
     "capability_grid": {
         "source_slide_index": 12,  # slide 13
-        "description": "Section subhead + cross-cutting label + intro + 3 column headings + 9 capability cards in a 3x3 grid.",
-        "use_when": "When the content is a MAP of many capabilities organised into 3 columns, with multiple sub-items per column. Perfect for 'the platform at a glance' or 'all the layers and what's in each'. Each card is JUST a heading (the brand description shapes on the source slide are auto-blanked).",
+        "description": "Section subhead + cross-cutting label + intro + 3 column headings + 9 capability cards in a 3x3 grid (each card has a heading AND a short description).",
+        "use_when": "When the content is a MAP of many capabilities organised into 3 columns, with multiple sub-items per column. Each card is 'Heading\\nOne-line description'. Up to 9 cards (3 per column).",
         "fields": {
             "subhead": {"match": "Bizzdesign", "required": True},
             "cross_label": {"match": "Transformation Collaboration", "required": True},
@@ -113,34 +113,20 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
                 {"match": "Transformation Design"},
                 {"match": "Transformation Governance"},
             ],
-            # 9 cards: 3 per column, ordered by column then by vertical position
+            # 9 paired cards: heading + description per card, ordered
+            # column-by-column (top to bottom within each column).
             "cards": [
-                {"match": "Strategic Portfolio Management"},
-                {"match": "Application Portfolio Management"},
-                {"match": "Technology Portfolio Management"},
-                {"match": "Enterprise Architecture Management"},
-                {"match": "Business Architecture Management"},
-                {"match": "Solution Architecture Management"},
-                {"match": "Business Process Management"},
-                {"match": "Data Management"},
-                {"match": "Governance, Risk & Compliance"},
+                {"heading_match": "Strategic Portfolio Management", "description_match": "Align investments with strategic goals"},
+                {"heading_match": "Application Portfolio Management", "description_match": "Reduce IT costs"},
+                {"heading_match": "Technology Portfolio Management", "description_match": "Stay ahead of obsolescence"},
+                {"heading_match": "Enterprise Architecture Management", "description_match": "Strengthen governance"},
+                {"heading_match": "Business Architecture Management", "description_match": "Turn insight into execution"},
+                {"heading_match": "Solution Architecture Management", "description_match": "Accelerate design with business context"},
+                {"heading_match": "Business Process Management", "description_match": "Increase process visibility"},
+                {"heading_match": "Data Management", "description_match": "Create a common data language"},
+                {"heading_match": "Governance, Risk & Compliance", "description_match": "Improve compliance visibility"},
             ],
         },
-        # Auto-clear: the source slide has 9 description text shapes paired
-        # with each card heading. When the user supplies new card content
-        # we don't have descriptions for it, so blank the originals rather
-        # than leaving Bizzdesign EA copy on the model's deck.
-        "clear_text_starting_with": [
-            "Align investments with strategic goals",
-            "Reduce IT costs",
-            "Stay ahead of obsolescence",
-            "Strengthen governance",
-            "Turn insight into execution",
-            "Accelerate design with business context",
-            "Increase process visibility",
-            "Create a common data language",
-            "Improve compliance visibility",
-        ],
     },
     "bullets": {
         # Special: built directly from the Basic Text layout, not cloned
@@ -370,9 +356,30 @@ def _clone_slide_into(working_pres, library_pres, source_index: int):
             continue
         if tag.endswith("}pic"):
             continue
-        new_tree.append(deepcopy(child))
+        cloned = deepcopy(child)
+        _replace_spautofit_with_normautofit(cloned)
+        new_tree.append(cloned)
 
     return new_slide
+
+
+def _replace_spautofit_with_normautofit(element) -> None:
+    """Walk an element's text-frame body props and swap any <a:spAutoFit/>
+    (shape grows to fit text) for <a:normAutofit/> (text shrinks to fit
+    shape). Brand layouts have fixed positions; auto-growing shapes
+    overflow the design (e.g. stat-card text spilling below the white
+    card rectangle).
+    """
+    from lxml import etree
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    for bodyPr in element.iter(f"{{{A_NS}}}bodyPr"):
+        sp_autofit = bodyPr.find(f"{{{A_NS}}}spAutoFit")
+        if sp_autofit is not None:
+            # Replace with normAutofit (text auto-shrinks on overflow).
+            bodyPr.remove(sp_autofit)
+            norm = etree.SubElement(bodyPr, f"{{{A_NS}}}normAutofit")
+            norm.set("fontScale", "100000")
+            norm.set("lnSpcReduction", "0")
 
 
 # ------------------------------------------------------------------
@@ -384,12 +391,54 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
     fields spec.
 
     `fields_spec` maps field_name → matcher dict OR list of matcher dicts (repeatable).
+    Matcher dict can be either:
+      - simple:  `{"match": "Prefix..."}`  — one shape per item
+      - paired:  `{"heading_match": "Prefix...", "description_match": "Prefix..."}`  —
+                 two shapes per item; user value is split at the first newline,
+                 line 1 goes to the heading shape, lines 2+ go to the description shape.
     `content` maps field_name → string OR list of strings.
 
     Returns a list of warnings (missing shapes, etc).
     """
     warnings: List[str] = []
     shapes = list(slide.shapes)
+
+    def _apply_text(shape, value):
+        if isinstance(value, list):
+            _set_shape_multiline(shape, [str(v) for v in value])
+        else:
+            text = str(value) if not isinstance(value, str) else value
+            if "\n" in text:
+                _set_shape_multiline(shape, text.split("\n"))
+            else:
+                _set_shape_text(shape, text)
+
+    def _apply_paired(shapes, matcher, value):
+        # value is a string; split at the FIRST newline.
+        text = _normalise_text(value) if isinstance(value, str) else str(value)
+        head, _, body = text.partition("\n")
+        head_shape = _find_shape_by_match(shapes, matcher["heading_match"])
+        desc_shape = _find_shape_by_match(shapes, matcher["description_match"])
+        if head_shape is None:
+            warnings.append(
+                f"Paired matcher: heading shape not found (prefix: {matcher['heading_match']!r})"
+            )
+        else:
+            _set_shape_text(head_shape, head)
+        if desc_shape is None:
+            warnings.append(
+                f"Paired matcher: description shape not found (prefix: {matcher['description_match']!r})"
+            )
+        else:
+            _set_shape_text(desc_shape, body)
+
+    def _clear_paired(shapes, matcher):
+        head_shape = _find_shape_by_match(shapes, matcher["heading_match"])
+        desc_shape = _find_shape_by_match(shapes, matcher["description_match"])
+        if head_shape is not None:
+            _clear_shape_text(head_shape)
+        if desc_shape is not None:
+            _clear_shape_text(desc_shape)
 
     for field_name, spec in fields_spec.items():
         value = content.get(field_name)
@@ -400,24 +449,27 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
                 warnings.append(f"Field '{field_name}' expected a list, got {type(values).__name__}")
                 values = []
             for i, matcher in enumerate(spec):
-                shape = _find_shape_by_match(shapes, matcher["match"])
-                if shape is None:
-                    warnings.append(f"Could not locate shape for {field_name}[{i}] (match prefix: {matcher['match']!r})")
-                    continue
+                is_paired = "heading_match" in matcher and "description_match" in matcher
                 if i < len(values):
-                    new_text = values[i]
-                    if isinstance(new_text, str):
-                        # Detect newlines → multiline
-                        if "\n" in new_text:
-                            _set_shape_multiline(shape, new_text.split("\n"))
-                        else:
-                            _set_shape_text(shape, new_text)
+                    if is_paired:
+                        _apply_paired(shapes, matcher, values[i])
                     else:
-                        _set_shape_text(shape, str(new_text))
+                        shape = _find_shape_by_match(shapes, matcher["match"])
+                        if shape is None:
+                            warnings.append(
+                                f"Could not locate shape for {field_name}[{i}] (match prefix: {matcher['match']!r})"
+                            )
+                            continue
+                        _apply_text(shape, values[i])
                 else:
                     # User supplied fewer values than the template has slots —
-                    # blank the unused shape.
-                    _clear_shape_text(shape)
+                    # blank the unused shape(s).
+                    if is_paired:
+                        _clear_paired(shapes, matcher)
+                    else:
+                        shape = _find_shape_by_match(shapes, matcher["match"])
+                        if shape is not None:
+                            _clear_shape_text(shape)
         else:
             # Scalar field.
             if value is None:
@@ -428,15 +480,21 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
             if shape is None:
                 warnings.append(f"Could not locate shape for '{field_name}' (match prefix: {spec['match']!r})")
                 continue
-            if isinstance(value, list):
-                _set_shape_multiline(shape, [str(v) for v in value])
-            else:
-                if "\n" in str(value):
-                    _set_shape_multiline(shape, str(value).split("\n"))
-                else:
-                    _set_shape_text(shape, str(value))
+            _apply_text(shape, value)
 
     return warnings
+
+
+def _clear_starting_with(slide, prefixes: List[str]) -> None:
+    """Defensive cleanup: blank any shape whose text starts with one of
+    the given prefixes. Used by compositions that leave behind original
+    template text in unaddressed shapes.
+    """
+    shapes = list(slide.shapes)
+    for prefix in prefixes:
+        shape = _find_shape_by_match(shapes, prefix)
+        if shape is not None:
+            _clear_shape_text(shape)
 
 
 # ------------------------------------------------------------------
@@ -976,22 +1034,66 @@ def register_composition_tools(
     ) -> Dict:
         """Add a 3-column × 3-row grid of capability cards.
 
-        Use this for "the whole platform at a glance" slides — when the
-        content is a MAP of many capabilities organised into 3 categories
-        with multiple sub-items per category. 9 cards total, distributed
-        as 3 cards per column in the order you supply them.
+        Use this for "the platform at a glance" — many capabilities
+        organised into 3 columns with up to 3 cards per column. Each
+        card has a heading AND a short description.
 
         Args:
-            subhead: Top-of-slide subhead (e.g. "Platform map", "All Capabilities").
-            cross_label: Cross-cutting label that spans the top center
-                (e.g. "Powered by Unify", "Across every surface").
-            cross_intro: Intro paragraph framing the grid.
-            col_headings: List of 3 column headings (e.g. ["Core Platform", "App-Wide Assistant", "Eval & Observability"]).
-            cards: List of up to 9 cards. Each card is a string formatted
-                as "HEADING\\nDescription text". Cards fill column 1 first
-                (top to bottom), then column 2, then column 3. Unused
-                slots are blanked.
+            subhead: Top-of-slide subhead, ≤ 6 words.
+            cross_label: Cross-cutting label that spans the top center, ≤ 5 words.
+            cross_intro: Intro paragraph framing the grid, 8-20 words.
+            col_headings: EXACTLY 3 column headings, each ≤ 4 words.
+            cards: Up to 9 cards. Each card is a string formatted as
+                "Heading\\nOne-line description". Heading ≤ 4 words.
+                Description 5-15 words (fits the small card slot). Cards
+                fill column 1 first (top to bottom), then column 2, then
+                column 3. Unused slots are blanked.
         """
+        violations: List[str] = []
+        if len(subhead.split()) > 6:
+            violations.append(f"subhead is {len(subhead.split())} words; max 6. Got: {subhead!r}")
+        if len(cross_label.split()) > 5:
+            violations.append(f"cross_label is {len(cross_label.split())} words; max 5. Got: {cross_label!r}")
+        cross_intro_text = _normalise_text(cross_intro) if isinstance(cross_intro, str) else str(cross_intro)
+        ci_words = len(cross_intro_text.split())
+        if ci_words < 8 or ci_words > 20:
+            violations.append(f"cross_intro is {ci_words} words; needs 8-20. Got: {cross_intro!r}")
+        if len(col_headings) != 3:
+            violations.append(f"col_headings must have exactly 3 items; got {len(col_headings)}.")
+        for i, h in enumerate(col_headings[:3]):
+            if len(h.split()) > 4:
+                violations.append(f"col_headings[{i}] is {len(h.split())} words; max 4. Got: {h!r}")
+        if not (1 <= len(cards) <= 9):
+            violations.append(f"cards must have 1-9 items; got {len(cards)}.")
+        for i, card in enumerate(cards[:9]):
+            normalised = _normalise_text(card) if isinstance(card, str) else str(card)
+            lines = [l.strip() for l in normalised.split("\n") if l.strip()]
+            if len(lines) < 2:
+                violations.append(
+                    f"cards[{i}] needs 'Heading\\nDescription'. Got just: {card!r}"
+                )
+                continue
+            heading = lines[0]
+            description = " ".join(lines[1:])
+            if len(heading.split()) > 4:
+                violations.append(f"cards[{i}] heading is {len(heading.split())} words; max 4. Got: {heading!r}")
+            d_words = len(description.split())
+            if d_words < 5 or d_words > 15:
+                violations.append(
+                    f"cards[{i}] description is {d_words} words; needs 5-15 (small card slot). "
+                    f"Got: {description!r}"
+                )
+        if violations:
+            return {
+                "error": "capability_grid content doesn't fit the grid format. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite per the violations and retry. The grid format constrains "
+                    "each card to ≤4-word heading + 5-15 word description. If your content "
+                    "needs more detail per item, use add_solution_detail_slide (3 items "
+                    "with rich descriptions) or split across multiple capability_grid slides."
+                ),
+            }
         return _build_composition(
             "capability_grid",
             {
