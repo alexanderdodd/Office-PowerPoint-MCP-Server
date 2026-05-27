@@ -168,6 +168,15 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
             ],
         },
     },
+    "closing": {
+        "source_slide_index": 36,  # slide 37 (0-indexed) — "Thank You" + CTA list
+        "description": "Final 'Thank you' slide with title + 2–6 short CTA / contact lines.",
+        "use_when": "ALWAYS the last slide of every deck. Carries the closing message (recommendation, ask, or thank-you) plus contact / next-step lines. This is the slide audiences look at while you wrap — make it count.",
+        "fields": {
+            "title": {"match": "Thank You", "required": True},
+            "cta_lines": {"match": "Book a Demo", "required": True},
+        },
+    },
     "value_cards": {
         "source_slide_index": 29,  # slide 30 (0-indexed)
         "description": "Subhead + title + 4 icon-topped cards, each with a heading and rich description.",
@@ -1046,6 +1055,75 @@ def register_composition_tools(
             title: Section title (claim form).
         """
         return _build_composition("section_divider", {"kicker": kicker, "title": title}, presentation_id)
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Closing Slide"),
+    )
+    def add_closing_slide(
+        title: str,
+        cta_lines: List[str],
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add the deck's closing slide — must be the FINAL slide of every deck.
+
+        The closing slide carries the wrap-up message and the calls-to-action
+        the audience should leave with (book a demo, contact us, visit the
+        portal, etc.). Clones the brand template's "Thank You" slide.
+
+        Args:
+            title: Closing title. Defaults to "Thank You" if you want the
+                stock wording. You can override with a deck-specific
+                closing claim like "Earn the right to grow — start Monday"
+                or "Three asks, one decision".
+            cta_lines: 2 to 6 short call-to-action lines. Each is one line
+                (8-20 words). Example for an external-facing deck:
+                  ["Book a demo to see the platform in action.",
+                   "Contact your account team to scope a pilot.",
+                   "Visit the support portal for technical docs."]
+                For an internal all-hands, use action-orientated lines:
+                  ["Q1 reforecast happens 30 days from today.",
+                   "Owner check-ins: Sarah, Marcus, Priya every Friday.",
+                   "If you have a question, message #2026-priorities."]
+        """
+        violations: List[str] = []
+        title_text = (title or "").strip()
+        if not title_text:
+            violations.append("title is empty")
+        elif len(title_text.split()) > 10:
+            violations.append(
+                f"title is {len(title_text.split())} words; closing titles must be ≤ 10."
+            )
+        if not isinstance(cta_lines, list) or len(cta_lines) < 2:
+            violations.append(
+                f"cta_lines must be a list of 2-6 strings; got {cta_lines!r}"
+            )
+        elif len(cta_lines) > 6:
+            violations.append(
+                f"cta_lines has {len(cta_lines)} items; max is 6."
+            )
+        else:
+            for i, line in enumerate(cta_lines):
+                wc = len((line or "").split())
+                if wc < 4 or wc > 20:
+                    violations.append(
+                        f"cta_lines[{i}] is {wc} words; needs 4-20. Got: {line!r}"
+                    )
+        if violations:
+            return {
+                "error": "closing slide content doesn't fit the format. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite per the violations. title is the final claim (≤10 words). "
+                    "cta_lines are 2-6 short action/contact lines (4-20 words each)."
+                ),
+            }
+        # Render cta_lines as newline-joined string so _set_shape_multiline
+        # writes each as its own paragraph in the CTA shape.
+        return _build_composition(
+            "closing",
+            {"title": title, "cta_lines": cta_lines},
+            presentation_id,
+        )
 
     @app.tool(
         annotations=ToolAnnotations(title="Add Value Props (4 Pillars)"),
