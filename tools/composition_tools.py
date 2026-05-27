@@ -1416,10 +1416,22 @@ def register_composition_tools(
         else:
             for i, ev in enumerate(events):
                 text = (ev or "").strip()
-                wc = len(text.split())
-                if wc < 3 or wc > 12:
+                words = text.split()
+                wc = len(words)
+                if wc < 3 or wc > 10:
                     violations.append(
-                        f"events[{i}] is {wc} words; needs 3-12 (date prefix + short description). Got: {ev!r}"
+                        f"events[{i}] is {wc} words; needs 3-10 (date prefix + "
+                        f"short description). Got: {ev!r}"
+                    )
+                # Each event slot is narrow; a single word longer than 12
+                # chars will break mid-word ("observability" → "observabilit y").
+                long_words = [w for w in words if len(w) > 12]
+                if long_words:
+                    violations.append(
+                        f"events[{i}] contains words > 12 chars: {long_words}. "
+                        f"Long words break mid-word in the narrow event slot "
+                        f"(e.g. 'observability' renders as 'observabilit y'). "
+                        f"Pick shorter synonyms or split the event. Got: {ev!r}"
                     )
         if violations:
             return {
@@ -1484,9 +1496,18 @@ def register_composition_tools(
             violations.append(
                 f"title is {title_wc} words; needs 3-8. Got: {title!r}"
             )
-        if not isinstance(benefits, list) or len(benefits) < 4 or len(benefits) > 6:
+        # Template slide 26 has 6 benefit paragraphs each preceded by a
+        # separate decorative-bar shape. Supplying 5 leaves one orphaned
+        # bar visible (paragraph-delete clears the text but doesn't
+        # touch the separate decoration shape). Restrict to 4 or 6 to
+        # avoid the awkward trailing-bar artifact.
+        if not isinstance(benefits, list) or len(benefits) not in (4, 6):
+            count = len(benefits) if isinstance(benefits, list) else type(benefits).__name__
             violations.append(
-                f"benefits must be a list of 4-6 items; got {benefits!r}"
+                f"benefits must be a list of EXACTLY 4 or 6 items; got "
+                f"{count}. The template has 6 slots each with a decorative "
+                f"bar; supplying 5 leaves an orphaned bar visible. Pad to 6 "
+                f"or trim to 4."
             )
         else:
             for i, line in enumerate(benefits):
@@ -1749,9 +1770,31 @@ def register_composition_tools(
 
         Args:
             title: Slide title (claim form, e.g. "Three things we need from leadership").
-            subhead: Small kicker line above the bullets (e.g. "NEXT STEPS" or "WHAT YOU CAN DO").
+            subhead: SHORT kicker line above the title — 1-5 words, ALL CAPS style
+                (e.g. "NEXT STEPS", "PRIORITY 1", "HIRING PLAN"). NOT a one-line
+                intro paragraph — that overflows the kicker shape and looks
+                broken. If you need a full sentence to introduce the bullets,
+                use solution_detail's `benefits` field instead.
             bullets: List of 3-6 short bullets (≤ 15 words each, parallel grammar).
         """
+        violations: List[str] = []
+        sub_wc = len((subhead or "").split())
+        if sub_wc > 5:
+            violations.append(
+                f"subhead is {sub_wc} words; bullets.subhead must be 1-5 words "
+                f"(kicker-style). Got: {subhead!r}. If you need a longer "
+                f"intro line, use solution_detail with that text in `benefits`."
+            )
+        if violations:
+            return {
+                "error": "bullets.subhead too long. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Shorten subhead to 1-5 words (an ALL-CAPS kicker like "
+                    "'NEXT STEPS' or 'HIRING PLAN'). For a full intro "
+                    "sentence, switch to add_solution_detail_slide."
+                ),
+            }
         return _build_composition(
             "bullets",
             {"title": title, "subhead": subhead, "bullets": bullets},
