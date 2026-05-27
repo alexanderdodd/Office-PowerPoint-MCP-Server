@@ -164,15 +164,24 @@ def _shape_text(shape) -> str:
 def _normalise_text(s: str) -> str:
     """Normalise common LLM escape artefacts in incoming text.
 
-    Models sometimes pass `\\n` (literal backslash + n) instead of an
-    actual newline, especially when content is shaped to look like a
-    JSON-escaped string. Treat those as real line breaks so they don't
-    render as visible `\\n` in the slide.
+    - Two-char literal `\\n` / `\\t` → real newline / tab (models sometimes
+      pass these escape sequences when they think they're producing
+      JSON-escaped strings).
+    - Multiple consecutive newlines collapse to a single newline (extra
+      blank lines in stat cards / multi-tier shapes render as visible
+      blank paragraphs and break the layout).
+    - Leading/trailing whitespace stripped.
     """
     if not isinstance(s, str):
         return s
-    # Two-character literal '\n' → real newline.
-    return s.replace("\\n", "\n").replace("\\t", "\t")
+    s = s.replace("\\n", "\n").replace("\\t", "\t")
+    # Collapse runs of \n\n+ (and \n \n etc.) to single \n. Trim per-line
+    # whitespace so " \n " also collapses cleanly.
+    parts = [p.strip() for p in s.split("\n")]
+    # Drop empty parts produced by collapsing, but keep one between any
+    # two non-empty parts (i.e. join with single \n).
+    parts = [p for p in parts if p]
+    return "\n".join(parts)
 
 
 def _set_shape_text(shape, new_text: str) -> None:
