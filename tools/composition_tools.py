@@ -1926,11 +1926,15 @@ def register_composition_tools(
             cross_label: Cross-cutting label that spans the top center, ≤ 5 words.
             cross_intro: Intro paragraph framing the grid, 8-20 words.
             col_headings: EXACTLY 3 column headings, each ≤ 4 words.
-            cards: Up to 9 cards. Each card is a string formatted as
-                "Heading\\nOne-line description". Heading ≤ 4 words.
-                Description 5-15 words (fits the small card slot). Cards
-                fill column 1 first (top to bottom), then column 2, then
-                column 3. Unused slots are blanked.
+            cards: EXACTLY 3, 6, or 9 cards (one full column at a time).
+                The template arranges cards 3-per-column × 3-columns;
+                partial columns leave visible empty whitespace. If your
+                content is 4 cards → use value_cards; 5 → use bullets;
+                7-8 → split across two capability_grid slides. Each card
+                is a string formatted as "Heading\\nOne-line description".
+                Heading ≤ 4 words. Description 5-15 words. Cards fill
+                column 1 first (top to bottom), then column 2, then
+                column 3.
         """
         violations: List[str] = []
         if len(subhead.split()) > 6:
@@ -1946,8 +1950,20 @@ def register_composition_tools(
         for i, h in enumerate(col_headings[:3]):
             if len(h.split()) > 4:
                 violations.append(f"col_headings[{i}] is {len(h.split())} words; max 4. Got: {h!r}")
-        if not (1 <= len(cards) <= 9):
-            violations.append(f"cards must have 1-9 items; got {len(cards)}.")
+        # The template arranges cards 3 per column × 3 columns. We need a
+        # FULL column at minimum — supplying fewer than 3 cards visibly
+        # empties the right-hand column(s). Acceptable counts are 3
+        # (1 column populated), 6 (2 columns), 9 (full grid). 4 / 5 / 7 /
+        # 8 leave half-empty columns and look broken — refuse those.
+        if len(cards) not in (3, 6, 9):
+            violations.append(
+                f"cards must have 3, 6, or 9 items (one full column at a time); "
+                f"got {len(cards)}. The template lays out cards 3-per-column × 3 "
+                f"columns; partial columns render as awkward whitespace. Round "
+                f"to 3/6/9, or use a different composition: 4 cards → "
+                f"value_cards or value_props_4; 5 → bullets or split_benefits; "
+                f"7-8 → bullets or two capability_grid slides."
+            )
         for i, card in enumerate(cards[:9]):
             normalised = _normalise_text(card) if isinstance(card, str) else str(card)
             lines = [l.strip() for l in normalised.split("\n") if l.strip()]
