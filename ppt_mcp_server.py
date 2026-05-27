@@ -240,6 +240,7 @@ register_presentation_tools(
     get_current_presentation_id,
     get_template_search_directories,
     library_template_paths,
+    set_current_presentation_id,
 )
 
 register_composition_tools(

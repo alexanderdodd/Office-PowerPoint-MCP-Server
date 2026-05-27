@@ -68,7 +68,7 @@ def _get_s3_client():
     return _S3_CLIENT
 
 
-def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, get_template_search_directories, library_template_paths: Optional[Dict[str, str]] = None):
+def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, get_template_search_directories, library_template_paths: Optional[Dict[str, str]] = None, set_current_presentation_id=None):
     """Register presentation management tools with the FastMCP app"""
     
     @app.tool(
@@ -146,6 +146,17 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             id = f"presentation_{len(presentations) + 1}"
 
         presentations[id] = pres
+        # Make this newly-created presentation the current one. Without
+        # this, the server's global `current_presentation_id` keeps
+        # pointing at whatever presentation was most recently opened or
+        # created by an earlier session — and Lambda concurrency=1 means
+        # every MCP session shares that global. When the model omits
+        # `presentation_id` in a downstream tool call, slides land in
+        # the wrong presentation, producing multi-brief Frankenstein
+        # decks. (Discovered via ralph iter 13: llm-legacy's deck came
+        # back with 27 slides — 7 econ + 9 co-obj + 11 llm-legacy.)
+        if set_current_presentation_id is not None:
+            set_current_presentation_id(id)
         # Record the source template path so composition tools can re-open
         # the library as a fresh Presentation per call.
         if library_template_paths is not None and resolved_template_path is not None:
@@ -293,6 +304,8 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
         # Store the presentation
         presentations[id] = pres
+        if set_current_presentation_id is not None:
+            set_current_presentation_id(id)
         if library_template_paths is not None:
             library_template_paths[id] = template_path
 
@@ -353,7 +366,9 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         
         # Store the presentation
         presentations[id] = pres
-        
+        if set_current_presentation_id is not None:
+            set_current_presentation_id(id)
+
         return {
             "presentation_id": id,
             "message": f"Opened presentation from {file_path} with ID: {id}",
