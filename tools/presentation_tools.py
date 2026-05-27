@@ -17,6 +17,86 @@ import utils as ppt_utils
 _S3_CLIENT = None
 
 
+def _purge_orphan_slide_parts(pptx_bytes: bytes) -> bytes:
+    """Drop slide parts that are no longer referenced by `presentation.xml.rels`.
+
+    python-pptx's `drop_rel` removes a slide from the in-memory rel graph
+    and `sldIdLst`, but the underlying `SlidePart` object stays registered
+    on the Package. On save it's still serialised as `ppt/slides/slideN.xml`
+    even though nothing reaches it. PowerPoint's strict validator flags
+    these orphan parts on open ("this file has problems, do you want to
+    repair it?") AND the orphan slides occasionally surface in the Outline
+    pane / file recovery flow as zombie content like "Thank You" or
+    "Questions?" left over from `delete_slide` calls during build.
+
+    This post-save pass:
+      1. Reads the legitimate slide target list from `presentation.xml.rels`.
+      2. Walks every `ppt/slides/slideN.xml` + matching `_rels/slideN.xml.rels`
+         in the zip and removes any whose filename isn't in the legitimate set.
+      3. Strips the corresponding `<Override PartName="/ppt/slides/slideN.xml">`
+         entries from `[Content_Types].xml` so the package validator stays
+         consistent.
+
+    Pure zip-level rewrite — no python-pptx state involved. Returns the
+    cleaned bytes.
+    """
+    import zipfile
+    import re
+    from io import BytesIO
+
+    src_buf = BytesIO(pptx_bytes)
+    with zipfile.ZipFile(src_buf, "r") as src:
+        names = src.namelist()
+        try:
+            pres_rels = src.read("ppt/_rels/presentation.xml.rels").decode("utf-8")
+        except KeyError:
+            # Unexpected shape — return unchanged rather than corrupt the file.
+            return pptx_bytes
+
+        legitimate = set()
+        for match in re.finditer(r'Target="slides/(slide\d+\.xml)"', pres_rels):
+            legitimate.add(match.group(1))
+
+        slide_path_re = re.compile(r"^ppt/slides/(slide\d+\.xml)$")
+        slide_rels_re = re.compile(r"^ppt/slides/_rels/(slide\d+\.xml)\.rels$")
+
+        orphans: set = set()
+        for name in names:
+            m = slide_path_re.match(name)
+            if m and m.group(1) not in legitimate:
+                orphans.add(name)
+                continue
+            m = slide_rels_re.match(name)
+            if m and m.group(1) not in legitimate:
+                orphans.add(name)
+
+        if not orphans:
+            return pptx_bytes
+
+        # Build the override-prune set: every orphan slide's content-type
+        # Override entry must come out of [Content_Types].xml too.
+        override_targets = {f"/{name}" for name in orphans if slide_path_re.match(name)}
+
+        out_buf = BytesIO()
+        with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as dst:
+            for name in names:
+                if name in orphans:
+                    continue
+                data = src.read(name)
+                if name == "[Content_Types].xml" and override_targets:
+                    text = data.decode("utf-8")
+                    for target in override_targets:
+                        # Match the full <Override .../> element with that PartName.
+                        text = re.sub(
+                            rf'<Override[^/]*PartName="{re.escape(target)}"[^/]*/>',
+                            "",
+                            text,
+                        )
+                    data = text.encode("utf-8")
+                dst.writestr(name, data)
+        return out_buf.getvalue()
+
+
 def _strip_template_slides(pres) -> int:
     """Remove every slide from a Presentation while keeping the slide
     masters and layouts (which carry the brand styling) intact.
@@ -416,7 +496,7 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         try:
             buffer = io.BytesIO()
             presentations[pres_id].save(buffer)
-            buffer.seek(0)
+            cleaned = _purge_orphan_slide_parts(buffer.getvalue())
 
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             key = f"pptx/{timestamp}-{uuid.uuid4()}.pptx"
@@ -425,7 +505,7 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             client.put_object(
                 Bucket=bucket,
                 Key=key,
-                Body=buffer.getvalue(),
+                Body=cleaned,
                 ContentType=(
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 ),
@@ -515,9 +595,15 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                # 1. Save the current pres to a temp .pptx.
+                # 1. Save the current pres to a temp .pptx (with orphan-slide
+                # cleanup applied so the soffice render matches what users
+                # will see when they open the saved deck).
                 pptx_path = os.path.join(tmp, "deck.pptx")
-                presentations[pres_id].save(pptx_path)
+                save_buf = io.BytesIO()
+                presentations[pres_id].save(save_buf)
+                cleaned = _purge_orphan_slide_parts(save_buf.getvalue())
+                with open(pptx_path, "wb") as f:
+                    f.write(cleaned)
 
                 # 2. soffice → pdf.
                 pdf_dir = os.path.join(tmp, "pdf")
