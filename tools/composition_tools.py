@@ -1300,13 +1300,19 @@ def register_composition_tools(
                 f"topic label. Got: {title!r}. Move it to `subtitle` and put "
                 f"your brief's headline message in `title` instead."
             )
-        if word_count > 16:
+        if word_count > 12:
             violations.append(
-                f"title is {word_count} words. Cover titles must be ≤ 16 words — "
-                f"longer ones overflow the title shape and the rendered text "
-                f"shrinks to be unreadable. Got: {title!r}. Compress the claim "
-                f"to its sharpest form (single sentence, one comma at most) and "
-                f"move the longer-form rationale to slide 2."
+                f"title is {word_count} words. Cover titles must be ≤ 12 words — "
+                f"longer ones overflow the title shape and orphan words on a "
+                f"second line. Got: {title!r}. Compress the claim to its "
+                f"sharpest form (single sentence, one comma at most) and move "
+                f"the longer-form rationale to slide 2."
+            )
+        if len(title_text) > 60:
+            violations.append(
+                f"title is {len(title_text)} characters. Cover titles must be "
+                f"≤ 60 chars total — longer ones wrap and orphan words even "
+                f"under the word cap. Got: {title!r}. Tighten the wording."
             )
         # An assertion has at least one verb-indicator OR a clause-break
         # punctuation mark. Topic labels typically have neither.
@@ -1538,9 +1544,16 @@ def register_composition_tools(
         title_text = (title or "").strip()
         if not title_text:
             violations.append("title is empty")
-        elif len(title_text.split()) > 10:
+        elif len(title_text.split()) > 8:
             violations.append(
-                f"title is {len(title_text.split())} words; closing titles must be ≤ 10."
+                f"title is {len(title_text.split())} words; closing titles must "
+                f"be ≤ 8 words to fit the title shape without wrapping to 3 "
+                f"lines. Got: {title!r}."
+            )
+        elif len(title_text) > 50:
+            violations.append(
+                f"title is {len(title_text)} chars; closing titles must be ≤ 50 "
+                f"chars total. Got: {title!r}."
             )
         if not isinstance(cta_lines, list) or len(cta_lines) < 2:
             violations.append(
