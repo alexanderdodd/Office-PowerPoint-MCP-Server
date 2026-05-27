@@ -718,6 +718,7 @@ def _apply_layout_fields(slide, content: Dict[str, Any]) -> List[str]:
     if title_text:
         if slide.shapes.title is not None:
             slide.shapes.title.text = str(title_text)
+            _rename_shape(slide.shapes.title, "title")
         else:
             warnings.append("No title placeholder on this layout")
 
@@ -730,6 +731,7 @@ def _apply_layout_fields(slide, content: Dict[str, Any]) -> List[str]:
                 break
         if ph_13 is not None:
             ph_13.text_frame.text = str(subhead_text)
+            _rename_shape(ph_13, "subhead")
         else:
             warnings.append("No placeholder idx 13 (subhead) on this layout")
 
@@ -755,6 +757,7 @@ def _apply_layout_fields(slide, content: Dict[str, Any]) -> List[str]:
             # as plain paragraphs. Override per-paragraph with explicit
             # <a:buChar char="•"/> so bullets actually appear.
             _force_bullet_glyphs(ph_14.text_frame)
+            _rename_shape(ph_14, "bullets")
     return warnings
 
 
