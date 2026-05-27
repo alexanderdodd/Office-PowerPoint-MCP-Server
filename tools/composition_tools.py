@@ -418,6 +418,21 @@ def _clone_slide_into(working_pres, library_pres, source_index: int):
     return new_slide
 
 
+def _tag_slide_with_composition(slide, composition_name: str) -> None:
+    """Set `<p:cSld name="composition:<name>">` on the slide so downstream
+    tooling (assessment harnesses, debug viewers) can identify which
+    composition produced each slide without inferring from shape names.
+
+    The `name` attribute on `<p:cSld>` is part of the OOXML schema
+    (ECMA-376 part 1, §19.3.1.16) and is not rendered anywhere visible to
+    the viewer, so it's safe to use as a metadata channel.
+    """
+    P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    csld = slide.element.find(f"{{{P_NS}}}cSld")
+    if csld is not None:
+        csld.set("name", f"composition:{composition_name}")
+
+
 def _replace_spautofit_with_normautofit(element) -> None:
     """Walk an element's text-frame body props and swap any <a:spAutoFit/>
     (shape grows to fit text) for <a:normAutofit/> (text shrinks to fit
@@ -782,6 +797,8 @@ def register_composition_tools(
                     _tighten_first_paragraph_line_spacing(new_slide, tighten)
         except Exception as e:
             return {"error": f"Failed to build {composition_name}: {e}"}
+
+        _tag_slide_with_composition(new_slide, composition_name)
 
         slide_index = len(working.slides) - 1
         result: Dict[str, Any] = {
