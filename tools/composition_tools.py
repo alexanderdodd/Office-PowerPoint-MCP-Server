@@ -168,6 +168,28 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
             ],
         },
     },
+    "timeline": {
+        "source_slide_index": 3,  # slide 4 (0-indexed) — "Our Growth Story" year-by-year
+        "description": "Subhead + 4-12 chronological events on a horizontal timeline with year/date markers.",
+        "use_when": "When the content is a chronological story (founding history, product launches, hiring sequence, contract milestones, customer journey by year). Each event is `Date Description` in one string — the year/date at the start anchors the marker. Events 4-12, each ≤ 12 words.",
+        "fields": {
+            "subhead": {"match": "Our Growth Story", "required": True},
+            "events": [
+                {"match": "2000"},
+                {"match": "2004"},
+                {"match": "2009"},
+                {"match": "2014"},
+                {"match": "2015"},
+                {"match": "2019"},
+                {"match": "2022"},
+                {"match": "2023"},
+                {"match": "2024"},
+                {"match": "Jan 2025"},
+                {"match": "Sept 2025"},
+                {"match": "Apr 2026"},
+            ],
+        },
+    },
     "split_benefits": {
         "source_slide_index": 25,  # slide 26 (0-indexed) — "Optimize and Reinforce your Operations"
         "description": "Split layout: large brand title (left), 4-6 short benefit lines over a stock background image (right).",
@@ -1121,6 +1143,70 @@ def register_composition_tools(
             title: Section title (claim form).
         """
         return _build_composition("section_divider", {"kicker": kicker, "title": title}, presentation_id)
+
+    @app.tool(
+        annotations=ToolAnnotations(title="Add Timeline Slide"),
+    )
+    def add_timeline_slide(
+        subhead: str,
+        events: List[str],
+        presentation_id: Optional[str] = None,
+    ) -> Dict:
+        """Add a horizontal timeline slide — subhead + 4-12 chronological
+        events with year/date markers along a horizontal axis.
+
+        Clones the brand template's "Our Growth Story" slide (year-by-year
+        history with dots between events). Use for founding histories,
+        product launches by year, hiring milestones, customer-journey
+        timelines — anything where the SEQUENCE of dates carries the
+        meaning.
+
+        Don't use for:
+        - 4 sequential PHASES with stages → use `add_process_steps_slide`.
+        - Non-chronological lists → use `add_bullets_slide`.
+
+        Args:
+            subhead: Section label, ≤ 5 words (e.g. "Our Growth Story",
+                "Product Milestones", "Q1 Rollout Plan").
+            events: 4-12 chronological items. Each is ONE string starting
+                with the date/year, then a short description:
+                  "2000 Founded to design better ways of working"
+                  "Q3 2024 Closed Series C at $200M valuation"
+                  "Sept 2025 Launched the unified platform beta"
+                Each event ≤ 12 words total (including the date prefix).
+        """
+        violations: List[str] = []
+        if len((subhead or "").split()) > 5:
+            violations.append(
+                f"subhead is {len(subhead.split())} words; max is 5. Got: {subhead!r}"
+            )
+        if not isinstance(events, list) or len(events) < 4 or len(events) > 12:
+            violations.append(
+                f"events must be a list of 4-12 items; got {len(events) if isinstance(events, list) else type(events).__name__}"
+            )
+        else:
+            for i, ev in enumerate(events):
+                text = (ev or "").strip()
+                wc = len(text.split())
+                if wc < 3 or wc > 12:
+                    violations.append(
+                        f"events[{i}] is {wc} words; needs 3-12 (date prefix + short description). Got: {ev!r}"
+                    )
+        if violations:
+            return {
+                "error": "timeline content doesn't fit the format. NO slide was added.",
+                "violations": violations,
+                "action": (
+                    "Rewrite per the violations. Each event is one string "
+                    "starting with the date/year ('2024 ...', 'Q3 2025 ...', "
+                    "'Sept 2025 ...') followed by a 2-10 word description."
+                ),
+            }
+        return _build_composition(
+            "timeline",
+            {"subhead": subhead, "events": events},
+            presentation_id,
+        )
 
     @app.tool(
         annotations=ToolAnnotations(title="Add Split Benefits Slide"),
