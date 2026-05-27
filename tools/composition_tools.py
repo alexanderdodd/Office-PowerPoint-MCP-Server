@@ -434,6 +434,37 @@ def _rename_shape(shape, role: str) -> None:
         pass
 
 
+def _widen_title_full_width(slide, working_pres, side_margin_in: float = 0.5) -> None:
+    """Resize the slide's title placeholder to span the full slide width.
+
+    The Basic Text layout title placeholder is narrower than the slide
+    by default (the template designed it for short titles). Real titles
+    routinely run 8-12 words and wrap to two lines in that narrow box,
+    eating vertical space and shoving body content downward. Stretching
+    the title to full slide width (minus a small side margin) lets most
+    titles fit on a single line without changing font size.
+
+    Only applied to layout-built slides (bullets, diagram, chart). The
+    cloned compositions inherit their title geometry from the template
+    on purpose — those slides are visually tuned with the title sitting
+    beside other shapes.
+    """
+    title_shape = slide.shapes.title
+    if title_shape is None:
+        return
+    try:
+        slide_w = working_pres.slide_width
+        margin = Inches(side_margin_in)
+        new_left = margin
+        new_width = slide_w - 2 * margin
+        title_shape.left = new_left
+        title_shape.width = new_width
+    except Exception:
+        # Some title shapes refuse geometry edits (rare); fail soft so
+        # the build continues with the template-default narrow title.
+        pass
+
+
 def _find_shape_by_match(shapes, match_prefix: str, original_texts=None, consumed=None):
     """Return the first shape whose ORIGINAL text starts with the given
     prefix (case-sensitive, stripped). None if not found.
@@ -567,6 +598,73 @@ def _clone_slide_into(working_pres, library_pres, source_index: int, strip_pictu
 _RENDER_UA = "bizzdesign-pptx-mcp/0.15 (+contact a.dodd@bizzdesign.com)"
 
 
+# Bizzdesign brand palette — derived from the corporate template's title
+# accent (the bright blue used on cover/divider titles) and supporting
+# tones. Used to theme rendered diagrams + charts so they look like they
+# belong to the same deck instead of generic black-on-white kroki output.
+_BIZZ_BRAND = {
+    "primary": "#2E7CF6",       # bright blue (title accent)
+    "primary_dark": "#1A4FB8",  # darker blue for borders / strokes
+    "primary_light": "#D5E5FF", # tinted fill for diagram nodes
+    "navy": "#0F1F4D",          # deep navy for text on light fills
+    "accent": "#F47B7B",        # warm coral for contrast series
+    "accent_light": "#FCD9D9",
+    "neutral": "#5C6675",       # medium gray for axis labels
+    "neutral_light": "#E6E9EE", # grid lines
+}
+
+# Series palette for charts with multiple datasets — keeps the brand
+# blue as the lead colour and pairs it with the coral accent + supporting
+# tones so a 2-5 series chart still reads coherently.
+_CHART_SERIES_PALETTE = [
+    "#2E7CF6",  # primary
+    "#F47B7B",  # accent coral
+    "#1A4FB8",  # primary dark
+    "#7AA8FA",  # primary light variant
+    "#D5905C",  # warm tan
+]
+
+
+def _theme_mermaid(mermaid_source: str) -> str:
+    """Prepend a Bizzdesign brand init directive to the Mermaid source.
+
+    Mermaid supports a `%%{init: {...} }%%` directive that sets theme
+    variables before parsing. The 'base' theme honours every variable
+    we set (the 'default' theme partially ignores overrides). If the
+    caller already supplied an init directive (sophisticated callers
+    might tune individual diagrams), leave it alone.
+    """
+    if mermaid_source.lstrip().startswith("%%{init"):
+        return mermaid_source
+    theme_vars = {
+        "primaryColor": _BIZZ_BRAND["primary_light"],
+        "primaryTextColor": _BIZZ_BRAND["navy"],
+        "primaryBorderColor": _BIZZ_BRAND["primary"],
+        "lineColor": _BIZZ_BRAND["primary_dark"],
+        "secondaryColor": _BIZZ_BRAND["accent_light"],
+        "tertiaryColor": "#FFFFFF",
+        "background": "#FFFFFF",
+        "mainBkg": _BIZZ_BRAND["primary_light"],
+        "secondBkg": _BIZZ_BRAND["accent_light"],
+        "fontFamily": "Helvetica, Arial, sans-serif",
+        "fontSize": "16px",
+        "nodeBorder": _BIZZ_BRAND["primary"],
+        "clusterBkg": "#F5F8FF",
+        "clusterBorder": _BIZZ_BRAND["primary_dark"],
+        "edgeLabelBackground": "#FFFFFF",
+        "actorBkg": _BIZZ_BRAND["primary_light"],
+        "actorBorder": _BIZZ_BRAND["primary"],
+        "actorTextColor": _BIZZ_BRAND["navy"],
+        "labelBoxBkgColor": _BIZZ_BRAND["primary_light"],
+        "labelBoxBorderColor": _BIZZ_BRAND["primary"],
+        "noteBkgColor": "#FFF8E1",
+        "noteBorderColor": _BIZZ_BRAND["neutral"],
+    }
+    import json as _json
+    init_directive = f"%%{{init: {_json.dumps({'theme': 'base', 'themeVariables': theme_vars})} }}%%"
+    return init_directive + "\n" + mermaid_source
+
+
 def _fetch_diagram_png(mermaid_source: str, timeout: int = 30) -> bytes:
     """POST Mermaid source to kroki.io and return the rendered PNG bytes.
 
@@ -576,11 +674,13 @@ def _fetch_diagram_png(mermaid_source: str, timeout: int = 30) -> bytes:
     kroki container if/when this matters for production SLAs.
 
     Kroki rejects the default Python urllib User-Agent — set a real one.
+    Source is auto-themed with Bizzdesign brand colours before sending.
     """
     import urllib.request
+    themed = _theme_mermaid(mermaid_source)
     req = urllib.request.Request(
         "https://kroki.io/mermaid/png",
-        data=mermaid_source.encode("utf-8"),
+        data=themed.encode("utf-8"),
         headers={
             "Content-Type": "text/plain",
             "Accept": "image/png",
@@ -592,16 +692,78 @@ def _fetch_diagram_png(mermaid_source: str, timeout: int = 30) -> bytes:
         return resp.read()
 
 
+def _theme_chart(chart_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply Bizzdesign brand palette + chart-chrome styling to a Chart.js config.
+
+    Mutates a copy of the supplied config so the caller's dict isn't
+    altered. Auto-assigns dataset colours from the brand series palette
+    if the caller didn't specify backgroundColor / borderColor; sets
+    axis label / grid line styling so the chart looks branded without
+    requiring the caller to know Chart.js styling syntax.
+    """
+    import copy as _copy
+    cfg = _copy.deepcopy(chart_config)
+    chart_type = cfg.get("type", "bar")
+    data = cfg.setdefault("data", {})
+    datasets = data.setdefault("datasets", [])
+
+    for i, ds in enumerate(datasets):
+        colour = _CHART_SERIES_PALETTE[i % len(_CHART_SERIES_PALETTE)]
+        if chart_type in ("pie", "doughnut"):
+            # Per-slice colours — one per label.
+            if "backgroundColor" not in ds:
+                ds["backgroundColor"] = [
+                    _CHART_SERIES_PALETTE[j % len(_CHART_SERIES_PALETTE)]
+                    for j in range(len(ds.get("data", [])))
+                ]
+            ds.setdefault("borderColor", "#FFFFFF")
+            ds.setdefault("borderWidth", 2)
+        else:
+            ds.setdefault("backgroundColor", colour)
+            ds.setdefault("borderColor", colour)
+            ds.setdefault("borderWidth", 2)
+            if chart_type == "line":
+                ds.setdefault("tension", 0.3)
+                ds.setdefault("pointRadius", 4)
+                ds.setdefault("pointBackgroundColor", colour)
+                ds.setdefault("fill", False)
+
+    options = cfg.setdefault("options", {})
+    options.setdefault("responsive", True)
+    options.setdefault("maintainAspectRatio", False)
+    plugins = options.setdefault("plugins", {})
+    legend = plugins.setdefault("legend", {})
+    legend.setdefault("position", "top")
+    legend_labels = legend.setdefault("labels", {})
+    legend_labels.setdefault("color", _BIZZ_BRAND["navy"])
+    legend_labels.setdefault("font", {"family": "Helvetica, Arial, sans-serif", "size": 14})
+
+    if chart_type not in ("pie", "doughnut"):
+        scales = options.setdefault("scales", {})
+        for axis_key in ("x", "y"):
+            axis = scales.setdefault(axis_key, {})
+            ticks = axis.setdefault("ticks", {})
+            ticks.setdefault("color", _BIZZ_BRAND["neutral"])
+            ticks.setdefault("font", {"family": "Helvetica, Arial, sans-serif", "size": 12})
+            grid = axis.setdefault("grid", {})
+            grid.setdefault("color", _BIZZ_BRAND["neutral_light"])
+            grid.setdefault("borderColor", _BIZZ_BRAND["neutral_light"])
+
+    return cfg
+
+
 def _fetch_chart_png(chart_config: Dict[str, Any], width: int = 800, height: int = 500, timeout: int = 30) -> bytes:
     """POST a Chart.js config to quickchart.io and return the rendered PNG.
 
     Same POC-vs-prod tradeoff as kroki — fine here, swap for self-hosted
-    quickchart later if needed.
+    quickchart later if needed. Config is auto-themed with the Bizzdesign
+    brand palette before sending.
     """
     import urllib.request
     import json as _json
+    themed = _theme_chart(chart_config)
     payload = {
-        "chart": chart_config,
+        "chart": themed,
         "width": width,
         "height": height,
         "backgroundColor": "white",
@@ -1027,6 +1189,7 @@ def register_composition_tools(
                     return {"error": f"Layout {layout_name!r} not found in working presentation."}
                 new_slide = working.slides.add_slide(layout)
                 warnings = _apply_layout_fields(new_slide, content)
+                _widen_title_full_width(new_slide, working)
             else:
                 new_slide = _clone_slide_into(
                     working,
@@ -1627,10 +1790,13 @@ def register_composition_tools(
 
         new_slide = working.slides.add_slide(layout)
 
-        # Set title via the layout's title placeholder.
+        # Set title via the layout's title placeholder and widen it to
+        # the full slide width so 8-12 word titles fit on a single line
+        # instead of wrapping into the body region.
         if new_slide.shapes.title is not None:
             new_slide.shapes.title.text = title
             _rename_shape(new_slide.shapes.title, "title")
+            _widen_title_full_width(new_slide, working)
 
         # Clear the body placeholder (idx 14 on Basic Text) — the picture
         # replaces it. We just blank the text; the placeholder shape
