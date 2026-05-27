@@ -1115,18 +1115,33 @@ def register_composition_tools(
                 body_cov = len(body_terms & headline_terms) / max(1, len(headline_terms))
                 cover_ok = cover_cov >= 0.4
                 body_ok = body_cov >= 0.6
+                missing_cover = sorted(headline_terms - cover_terms)
                 missing_body = sorted(headline_terms - body_terms)
+                hint_parts = []
+                if not cover_ok:
+                    # Pick a handful of the missing terms to suggest verbatim.
+                    suggest = missing_cover[: max(3, len(headline_terms) // 3)]
+                    hint_parts.append(
+                        f"call delete_slide(0) and then add_cover_slide again. "
+                        f"The new title MUST include at least these words from the "
+                        f"headline (verbatim): {suggest}. Keep within 7-16 words — "
+                        f"pick a single sharp sentence that uses those words."
+                    )
+                if not body_ok:
+                    hint_parts.append(
+                        f"Add or rewrite a body slide title to include these "
+                        f"missing headline terms: {missing_body}. Use add_bullets_slide "
+                        f"or add_solution_detail_slide with a title that literally "
+                        f"uses 2-3 of those words."
+                    )
                 probe_results.append({
                     "name": "title-ladder",
                     "passed": cover_ok and body_ok,
                     "detail": None if (cover_ok and body_ok) else (
-                        (f"cover covers {int(cover_cov*100)}% of headline terms (need ≥40%). " if not cover_ok else "") +
+                        (f"cover covers {int(cover_cov*100)}% of headline terms (need ≥40%) — missing: {missing_cover}. " if not cover_ok else "") +
                         (f"body covers {int(body_cov*100)}% (need ≥60%) — missing: {missing_body}." if not body_ok else "")
                     ).strip(),
-                    "fix_hint": None if (cover_ok and body_ok) else (
-                        "Rewrite slide 0 (cover) to use more of the headline's key terms verbatim. "
-                        "And/or add or rewrite a body slide title using the missing terms."
-                    ),
+                    "fix_hint": None if (cover_ok and body_ok) else " ".join(hint_parts),
                 })
 
         failures = [p for p in probe_results if not p["passed"]]
