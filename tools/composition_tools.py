@@ -102,8 +102,8 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
     },
     "capability_grid": {
         "source_slide_index": 12,  # slide 13
-        "description": "Section subhead + cross-cutting label + intro + 3 column headings + 9 capability cards in a 3x3 grid (each: heading + description).",
-        "use_when": "When the content is a MAP of many capabilities organised into 3 columns, with multiple sub-items per column. Perfect for 'the platform at a glance' or 'all the layers and what's in each'. Each card is 'HEADING\\nDescription text'. If you have fewer than 3 cards per column, the unused slots are blanked.",
+        "description": "Section subhead + cross-cutting label + intro + 3 column headings + 9 capability cards in a 3x3 grid.",
+        "use_when": "When the content is a MAP of many capabilities organised into 3 columns, with multiple sub-items per column. Perfect for 'the platform at a glance' or 'all the layers and what's in each'. Each card is JUST a heading (the brand description shapes on the source slide are auto-blanked).",
         "fields": {
             "subhead": {"match": "Bizzdesign", "required": True},
             "cross_label": {"match": "Transformation Collaboration", "required": True},
@@ -126,6 +126,21 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
                 {"match": "Governance, Risk & Compliance"},
             ],
         },
+        # Auto-clear: the source slide has 9 description text shapes paired
+        # with each card heading. When the user supplies new card content
+        # we don't have descriptions for it, so blank the originals rather
+        # than leaving Bizzdesign EA copy on the model's deck.
+        "clear_text_starting_with": [
+            "Align investments with strategic goals",
+            "Reduce IT costs",
+            "Stay ahead of obsolescence",
+            "Strengthen governance",
+            "Turn insight into execution",
+            "Accelerate design with business context",
+            "Increase process visibility",
+            "Create a common data language",
+            "Improve compliance visibility",
+        ],
     },
     "bullets": {
         # Special: built directly from the Basic Text layout, not cloned
@@ -160,6 +175,20 @@ def _shape_text(shape) -> str:
     return "".join(parts)
 
 
+def _normalise_text(s: str) -> str:
+    """Normalise common LLM escape artefacts in incoming text.
+
+    Models sometimes pass `\\n` (literal backslash + n) instead of an
+    actual newline, especially when content is shaped to look like a
+    JSON-escaped string. Treat those as real line breaks so they don't
+    render as visible `\\n` in the slide.
+    """
+    if not isinstance(s, str):
+        return s
+    # Two-character literal '\n' → real newline.
+    return s.replace("\\n", "\n").replace("\\t", "\t")
+
+
 def _set_shape_text(shape, new_text: str) -> None:
     """Replace a shape's entire text content, preserving the styling of the
     FIRST run in the FIRST paragraph (font, size, colour, bold, etc.).
@@ -169,6 +198,7 @@ def _set_shape_text(shape, new_text: str) -> None:
     """
     if not shape.has_text_frame:
         return
+    new_text = _normalise_text(new_text)
     tf = shape.text_frame
     # Keep first paragraph; delete the rest.
     paragraphs = tf.paragraphs
@@ -197,6 +227,8 @@ def _set_shape_multiline(shape, lines: List[str]) -> None:
     if not shape.has_text_frame or not lines:
         _set_shape_text(shape, "")
         return
+    # Normalise escape artefacts in every line.
+    lines = [_normalise_text(l) for l in lines]
     # First line goes through _set_shape_text (preserves first run styling).
     _set_shape_text(shape, lines[0])
     if len(lines) == 1:
@@ -683,25 +715,79 @@ def register_composition_tools(
         stats: List[str],
         presentation_id: Optional[str] = None,
     ) -> Dict:
-        """Add a slide with 4 big-number stat cards.
+        """Add a slide with 4 big-number stat cards. Each card has a small
+        physical footprint (~3in wide x 1in tall) — content MUST be tight.
 
-        Numbers make decks land. Reach for this any time the content has
-        stats — capabilities counts, team counts, customer counts, time
-        savings, revenue numbers, dates, milestones.
+        HARD CHARACTER LIMITS — content that exceeds these overflows the
+        card boundary and looks broken. The composition returns a warning
+        if any limit is exceeded; rewrite shorter and retry.
+
+        Each stat is a single string with up to THREE lines separated by
+        actual newlines:
+
+            VALUE\\nLABEL\\nATTRIBUTION
+
+        - VALUE:   1-6 chars. A number or short symbol. ("60+", "$5.5M", "100%", "Q2", "3x")
+        - LABEL:   2-3 words, max 18 chars. The "what" of the number. ("Capabilities", "Annual Savings", "Ship Date")
+        - ATTRIBUTION: optional. 4-10 words, max 40 chars. Brief context. ("Across 5 platform layers", "Achieved by a UK insurer")
+
+        GOOD:   "60+\\nCapabilities\\nAcross 5 platform layers"
+        BAD:    "6\\nCapability pillars spanning infrastructure to user experience"   (label way too long)
+        BAD:    "Six different\\nThings\\nFor different reasons"   (value should be a number/symbol)
 
         Args:
-            subhead: Small kicker line at the top (e.g. "By the numbers", "Our impact", "Today").
-            intro: One-line intro sentence above the stat cards.
-            stats: List of 3 or 4 stats. Each stat is a single string with
-                three lines: "VALUE\\nLABEL\\nATTRIBUTION". E.g.
-                "60+\\nCapabilities\\nAcross 5 platform layers".
-                If you supply fewer than 4, unused slots are blanked.
+            subhead: Small kicker line at the top, max 5 words. ("By the numbers", "Today's scale", "Our impact").
+            intro: One-line intro sentence above the cards, max 12 words.
+            stats: List of 3 or 4 stats. Each follows the VALUE/LABEL/ATTRIBUTION
+                contract above. Fewer than 4 supplied → unused slots are blanked.
         """
-        return _build_composition(
+        # Validate field lengths and surface warnings the model can act on.
+        validation_warnings: List[str] = []
+        if len(subhead.split()) > 5:
+            validation_warnings.append(
+                f"subhead is {len(subhead.split())} words; max is 5. Shorter is better."
+            )
+        if len(intro.split()) > 12:
+            validation_warnings.append(
+                f"intro is {len(intro.split())} words; max is 12."
+            )
+        for i, stat in enumerate(stats[:4]):
+            normalised = _normalise_text(stat) if isinstance(stat, str) else str(stat)
+            lines = normalised.split("\n")
+            if len(lines) < 2:
+                validation_warnings.append(
+                    f"stats[{i}] has only {len(lines)} line(s); needs at least VALUE + LABEL "
+                    f"separated by newline. Got: {stat!r}"
+                )
+                continue
+            value, label = lines[0].strip(), lines[1].strip()
+            attribution = lines[2].strip() if len(lines) > 2 else ""
+            if len(value) > 6:
+                validation_warnings.append(
+                    f"stats[{i}] VALUE is {len(value)} chars (max 6). Got: {value!r}"
+                )
+            if len(label) > 18:
+                validation_warnings.append(
+                    f"stats[{i}] LABEL is {len(label)} chars (max 18). Got: {label!r}"
+                )
+            if attribution and len(attribution) > 40:
+                validation_warnings.append(
+                    f"stats[{i}] ATTRIBUTION is {len(attribution)} chars (max 40). Got: {attribution!r}"
+                )
+        result = _build_composition(
             "stat_cards",
             {"subhead": subhead, "intro": intro, "stats": stats},
             presentation_id,
         )
+        if validation_warnings:
+            existing = result.get("warnings", [])
+            result["warnings"] = existing + validation_warnings
+            # Add a clear actionable note so the model knows to rewrite.
+            result["action"] = (
+                "Some fields exceed the stat-card character limits and will overflow visually. "
+                "Rewrite the offending stats to fit the limits and call add_stat_cards_slide again."
+            )
+        return result
 
     @app.tool(
         annotations=ToolAnnotations(title="Add Capability Grid Slide"),
