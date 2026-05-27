@@ -23,6 +23,21 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# soffice (LibreOffice) + poppler-utils are needed by the
+# render_deck_to_images tool which converts the working presentation
+# to per-slide PNGs so the assistant can visually inspect its build
+# before saving. libreoffice-core + libreoffice-impress is the
+# minimum subset for pptx → pdf headless conversion (~280MB);
+# poppler-utils provides pdftoppm for pdf → png-per-page (~20MB).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libreoffice-core \
+        libreoffice-impress \
+        poppler-utils \
+        fonts-dejavu \
+        fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

@@ -447,6 +447,137 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
     @app.tool(
         annotations=ToolAnnotations(
+            title="Render Deck to Images",
+            readOnlyHint=True,
+        ),
+    )
+    def render_deck_to_images(presentation_id: Optional[str] = None) -> Dict:
+        """Render the current presentation to one PNG per slide, upload
+        the PNGs to S3, and return a map of slide_index → public PNG URL.
+
+        Use this AFTER validate_deck passes and BEFORE
+        save_presentation_to_url. You — the AI assistant — should fetch
+        each PNG URL into your context (you have multimodal vision) and
+        visually inspect each slide. Look for:
+          - text overflow / orphan words on titles
+          - empty slots / unfilled card columns
+          - inappropriate template imagery bleeding through
+          - font-size inconsistency across same-role shapes
+          - low-contrast text or any layout artifact
+
+        If you spot a visual issue, fix it with `delete_slide(<idx>)` +
+        a fresh composition call, then re-call this tool to confirm.
+        Only call save_presentation_to_url when every slide looks right.
+
+        Returns:
+          slides: list of {slide_index, png_url} ordered by slide.
+          message: human-readable summary.
+          error / setup_required: present if rendering isn't supported
+            in the running environment (e.g. soffice not installed).
+        """
+        pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
+        if pres_id is None or pres_id not in presentations:
+            return {
+                "error": "No presentation is currently loaded or the specified ID is invalid"
+            }
+
+        bucket = os.environ.get("PPTX_OUTPUT_BUCKET")
+        if not bucket:
+            return {
+                "error": "PPTX_OUTPUT_BUCKET env var is not set on the MCP server."
+            }
+
+        # Locate soffice. Lambda image installs it via apt (libreoffice-core
+        # + libreoffice-impress); skip the rendering path with a clear
+        # `setup_required` flag if missing.
+        import shutil
+        soffice = shutil.which("soffice") or shutil.which("libreoffice")
+        pdftoppm = shutil.which("pdftoppm")
+        if not soffice or not pdftoppm:
+            return {
+                "error": "Rendering tools not installed on this MCP server.",
+                "setup_required": {
+                    "missing": [n for n, p in [("soffice", soffice), ("pdftoppm", pdftoppm)] if not p],
+                    "fix": (
+                        "Rebuild the MCP server Docker image with `apt-get install "
+                        "libreoffice-core libreoffice-impress poppler-utils`. "
+                        "Local dev: `brew install --cask libreoffice && brew install poppler`."
+                    ),
+                },
+            }
+
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+        client = _get_s3_client()
+
+        import subprocess
+        import tempfile
+        import glob
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                # 1. Save the current pres to a temp .pptx.
+                pptx_path = os.path.join(tmp, "deck.pptx")
+                presentations[pres_id].save(pptx_path)
+
+                # 2. soffice → pdf.
+                pdf_dir = os.path.join(tmp, "pdf")
+                os.makedirs(pdf_dir, exist_ok=True)
+                # HOME needs to be writable for soffice user-profile init.
+                env = os.environ.copy()
+                env.setdefault("HOME", tmp)
+                subprocess.run(
+                    [soffice, "--headless", "--convert-to", "pdf", "--outdir", pdf_dir, pptx_path],
+                    check=True, env=env, capture_output=True, timeout=120,
+                )
+                pdf_path = os.path.join(pdf_dir, "deck.pdf")
+                if not os.path.exists(pdf_path):
+                    return {"error": f"soffice didn't produce a PDF at {pdf_path}"}
+
+                # 3. pdftoppm → png per page.
+                png_dir = os.path.join(tmp, "pngs")
+                os.makedirs(png_dir, exist_ok=True)
+                subprocess.run(
+                    [pdftoppm, "-png", "-r", "100", pdf_path, os.path.join(png_dir, "slide")],
+                    check=True, timeout=60,
+                )
+
+                # 4. Upload each PNG to S3.
+                pngs = sorted(glob.glob(os.path.join(png_dir, "slide-*.png")))
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                upload_id = uuid.uuid4()
+                results = []
+                for i, png_path in enumerate(pngs):
+                    key = f"pptx-renders/{timestamp}-{upload_id}-slide-{i + 1:03d}.png"
+                    with open(png_path, "rb") as fh:
+                        client.put_object(
+                            Bucket=bucket,
+                            Key=key,
+                            Body=fh.read(),
+                            ContentType="image/png",
+                        )
+                    results.append({
+                        "slide_index": i,
+                        "png_url": f"https://s3.{region}.amazonaws.com/{bucket}/{key}",
+                    })
+
+                return {
+                    "slides": results,
+                    "message": (
+                        f"Rendered {len(results)} slides to PNG and uploaded to S3. "
+                        "FETCH each URL into your context and visually inspect — "
+                        "look for text overflow, orphan words, empty card/column "
+                        "slots, inappropriate template imagery, font inconsistency, "
+                        "low contrast. Fix visual issues with delete_slide + a "
+                        "fresh composition call, then re-render to confirm."
+                    ),
+                }
+        except subprocess.CalledProcessError as e:
+            return {"error": f"Render command failed: {e.stderr.decode('utf-8', 'replace') if e.stderr else e}"}
+        except Exception as e:
+            return {"error": f"Render failed: {e!r}"}
+
+    @app.tool(
+        annotations=ToolAnnotations(
             title="Get Presentation Info",
             readOnlyHint=True,
         ),
