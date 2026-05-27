@@ -408,6 +408,41 @@ def _clear_shape_text(shape) -> None:
 # Slide cloning
 # ------------------------------------------------------------------
 
+def _clone_pic_into(pic_element, src_slide, dst_slide):
+    """Clone a `<p:pic>` element from `src_slide` into `dst_slide`,
+    rewiring its `r:embed` so the new picture points at the same media
+    part via a fresh relationship on the destination slide.
+
+    Previously `_clone_slide_into` skipped pictures because copying the
+    XML alone leaves a dangling embed reference — the destination slide's
+    rels don't contain the source's rId, so the picture renders as an
+    empty placeholder. This helper preserves the visual (stock
+    backgrounds, hero photos, decorative imagery) by adding the rel.
+    """
+    from copy import deepcopy
+    R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    EMBED_ATTR = f"{{{R_NS}}}embed"
+    LINK_ATTR = f"{{{R_NS}}}link"
+
+    cloned = deepcopy(pic_element)
+    src_part = src_slide.part
+    dst_part = dst_slide.part
+
+    for blip in cloned.iter(f"{{{A_NS}}}blip"):
+        for attr_name in (EMBED_ATTR, LINK_ATTR):
+            old_rid = blip.get(attr_name)
+            if old_rid is None:
+                continue
+            try:
+                src_rel = src_part.rels[old_rid]
+            except KeyError:
+                continue
+            new_rid = dst_part.relate_to(src_rel.target_part, src_rel.reltype)
+            blip.set(attr_name, new_rid)
+    return cloned
+
+
 def _clone_slide_into(working_pres, library_pres, source_index: int):
     """Append a new slide to `working_pres` that is a deep clone of
     `library_pres.slides[source_index]`. Returns the new Slide.
@@ -440,13 +475,11 @@ def _clone_slide_into(working_pres, library_pres, source_index: int):
         sp.getparent().remove(sp)
 
     # Deep-copy each shape from source into the new slide's shape tree.
-    # Skip:
-    #   - {nv,}GrpSpPr (group props at the top of spTree)
-    #   - <p:pic> (pictures — their <a:blip r:embed="rIdN"/> refs point to
-    #     relationships on the SOURCE slide that we don't replicate, so on
-    #     the clone they resolve to "missing image" empty boxes. Branded
-    #     text shapes carry the styling; decorative imagery is a Phase 2
-    #     concern that needs proper rel + media copying.)
+    # Skip {nv,}GrpSpPr (group props at the top of spTree).
+    # `<p:pic>` elements are now cloned WITH their image relationship
+    # rewired (see _clone_pic_into) — picture-bearing slides (the AI
+    # capabilities slide, split-layout benefit slides 24-27, stat-cards
+    # background image) now render correctly instead of as empty boxes.
     src_tree = src_slide.shapes._spTree
     new_tree = new_slide.shapes._spTree
     for child in list(src_tree):
@@ -454,6 +487,7 @@ def _clone_slide_into(working_pres, library_pres, source_index: int):
         if tag.endswith("}nvGrpSpPr") or tag.endswith("}grpSpPr"):
             continue
         if tag.endswith("}pic"):
+            new_tree.append(_clone_pic_into(child, src_slide, new_slide))
             continue
         cloned = deepcopy(child)
         _replace_spautofit_with_normautofit(cloned)
