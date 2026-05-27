@@ -1644,10 +1644,14 @@ def register_composition_tools(
 
         # Drop the picture centered in the body region.
         # Standard 16:9 slide is 13.333in × 7.5in (12192000 × 6858000 EMU).
-        # Reserve top ~1.3in for the title; bottom ~0.6in for caption.
+        # Reserve top ~1.9in for the title — the Basic Text layout's title
+        # placeholder spans ~1.0in tall but sits ~0.5in from the top with
+        # extra breathing room before the body, so anything under ~1.8in
+        # collides with the title (seen on chart slides where wide PNGs
+        # take maximum height and shove up against the title text).
         slide_w = working.slide_width
         slide_h = working.slide_height
-        top_reserve = Inches(1.3)
+        top_reserve = Inches(1.9)
         bottom_reserve = Inches(0.8) if caption else Inches(0.4)
         avail_w = slide_w - Inches(1.0)  # 0.5in margin each side
         avail_h = slide_h - top_reserve - bottom_reserve
