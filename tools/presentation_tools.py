@@ -92,7 +92,13 @@ def _purge_orphan_slide_parts(pptx_bytes: bytes) -> bytes:
             pres_xml_raw = ""
         has_sections = "<p14:sectionLst" in pres_xml_raw
 
-        if not orphans and not has_sections:
+        # Also check for duplicate filename entries (python-pptx sometimes
+        # writes the same media part twice when multiple slides reference
+        # it). Duplicates corrupt the file for soffice + PowerPoint, so
+        # always rewrite if any are present.
+        has_duplicates = len(names) != len(set(names))
+
+        if not orphans and not has_sections and not has_duplicates:
             return pptx_bytes
 
         # Build the override-prune set: every orphan slide's content-type
@@ -108,11 +114,20 @@ def _purge_orphan_slide_parts(pptx_bytes: bytes) -> bytes:
             re.DOTALL,
         )
 
+        # Always purge duplicate entries too — python-pptx occasionally
+        # emits the same media file twice in the output zip when more than
+        # one slide references it (seen on iter 41 platform-rearch deck
+        # where image29.jpeg appeared twice in the central directory).
+        # Duplicate entries pass zipfile.is_zipfile but break python-pptx,
+        # soffice, and PowerPoint with a "could not load" / "corrupt"
+        # error. Dedupe by writing each unique name at most once.
         out_buf = BytesIO()
+        seen: set = set()
         with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as dst:
             for name in names:
-                if name in orphans:
+                if name in orphans or name in seen:
                     continue
+                seen.add(name)
                 data = src.read(name)
                 if name == "[Content_Types].xml" and override_targets:
                     text = data.decode("utf-8")
