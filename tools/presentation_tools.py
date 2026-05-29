@@ -275,16 +275,20 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         if id is None:
             id = f"presentation_{len(presentations) + 1}"
 
+        # iter 47: Clear previous presentations on a new create_presentation
+        # call. Lambda concurrency=1 + module-level `presentations` dict
+        # means decks from prior MCP sessions stay loaded — `list_presentations`
+        # then surfaces them and the agent gets confused about which
+        # current_presentation_id to trust. Iter 46 sweep had co-obj's
+        # agent fall into a loop on `ai_platform_roadmap` leftover from
+        # iter 44's platform-rearch crash. A `create_presentation` call is
+        # by definition the start of a fresh deck — flush the stale
+        # state. The previous iter-13 set_current_presentation_id fix
+        # is preserved; this layers a dict-clear on top.
+        presentations.clear()
+        if library_template_paths is not None:
+            library_template_paths.clear()
         presentations[id] = pres
-        # Make this newly-created presentation the current one. Without
-        # this, the server's global `current_presentation_id` keeps
-        # pointing at whatever presentation was most recently opened or
-        # created by an earlier session — and Lambda concurrency=1 means
-        # every MCP session shares that global. When the model omits
-        # `presentation_id` in a downstream tool call, slides land in
-        # the wrong presentation, producing multi-brief Frankenstein
-        # decks. (Discovered via ralph iter 13: llm-legacy's deck came
-        # back with 27 slides — 7 econ + 9 co-obj + 11 llm-legacy.)
         if set_current_presentation_id is not None:
             set_current_presentation_id(id)
         # Record the source template path so composition tools can re-open
