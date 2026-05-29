@@ -529,18 +529,50 @@ def _clear_shape_text(shape) -> None:
 
 def _clone_pic_into(pic_element, src_slide, dst_slide):
     """Clone a `<p:pic>` element from `src_slide` into `dst_slide`,
-    rewiring its `r:embed` so the new picture points at the same media
-    part via a fresh relationship on the destination slide.
+    rewiring EVERY `r:embed` / `r:link` attribute so the new picture
+    points at the same media part(s) via fresh relationships on the
+    destination slide.
 
-    Previously `_clone_slide_into` skipped pictures because copying the
-    XML alone leaves a dangling embed reference — the destination slide's
-    rels don't contain the source's rId, so the picture renders as an
-    empty placeholder. This helper preserves the visual (stock
-    backgrounds, hero photos, decorative imagery) by adding the rel.
+    Iter 12 added this helper but only rewired refs on `<a:blip>`
+    elements. That worked for plain pictures but missed two nested
+    extensions that the Bizzdesign template uses heavily:
+
+    1. `<asvg:svgBlip r:embed="...">` — Office 2016+ SVG sibling
+       reference, sitting inside `<a:blip>/<a:extLst>/<a:ext
+       uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}">/<asvg:svgBlip>`.
+       Carries an extra rId pointing at the SVG version of the same
+       graphic (e.g. brand-icon vector for crisp scaling).
+    2. `<a14:imgLayer r:embed="...">` — Office 2010 picture-effects
+       layer, sitting inside `<a:blip>/<a:extLst>/<a:ext
+       uri="{BEBA8EAE-BF5A-486C-A8C5-ECC9F3942E4B}">/<a14:imgLayer>`.
+       Carries an rId pointing at the un-effected source image so the
+       picture-effects (brightness, sharpening, crop) can reapply on
+       open.
+
+    Both extensions are deep-copied along with the rest of the picture
+    XML, but their rIds reference the SOURCE slide's rel graph — not
+    the destination's. Result: PowerPoint opens the file, can't resolve
+    the embed, prompts "this file needs to be repaired", and on accept
+    silently drops the picture. Same failure root cause as iter 12's
+    original `_clone_slide_into` skipping pictures entirely.
+
+    Fix: walk every descendant element of the cloned `<p:pic>` and for
+    every element that has an `r:embed` or `r:link` attribute, rewire
+    it via the same `dst_part.relate_to` dance the iter-12 code did
+    for `<a:blip>`. Generic over namespace — works for `<a:blip>`,
+    `<asvg:svgBlip>`, `<a14:imgLayer>`, and any future extension that
+    follows the OOXML relationship-attribute convention.
+
+    Driven by user feedback 2026-05-29: generated decks were prompting
+    "this file needs to be repaired" on first open in Microsoft
+    PowerPoint despite iter 41's save-time zip cleanup. Diagnosis on
+    the user's example deck found dangling r:embed refs on slides 1,
+    3, and 7 — exactly the picture-rich slides (cover, stat_cards,
+    value_cards). Now caught by the per-slide `embed-refs-resolve`
+    probe in assess.ts as a regression guardrail.
     """
     from copy import deepcopy
     R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
     EMBED_ATTR = f"{{{R_NS}}}embed"
     LINK_ATTR = f"{{{R_NS}}}link"
 
@@ -548,17 +580,25 @@ def _clone_pic_into(pic_element, src_slide, dst_slide):
     src_part = src_slide.part
     dst_part = dst_slide.part
 
-    for blip in cloned.iter(f"{{{A_NS}}}blip"):
+    # Walk the entire subtree, not just <a:blip>. Any element that
+    # carries an r:embed or r:link references a relationship that must
+    # be rewired into the destination slide's rel graph.
+    for el in cloned.iter():
         for attr_name in (EMBED_ATTR, LINK_ATTR):
-            old_rid = blip.get(attr_name)
+            old_rid = el.get(attr_name)
             if old_rid is None:
                 continue
             try:
                 src_rel = src_part.rels[old_rid]
             except KeyError:
+                # Source rel already missing — strip the attribute so
+                # we don't write a dangling ref into the destination.
+                # PowerPoint forgives a missing attribute; it does not
+                # forgive a dangling rId.
+                del el.attrib[attr_name]
                 continue
             new_rid = dst_part.relate_to(src_rel.target_part, src_rel.reltype)
-            blip.set(attr_name, new_rid)
+            el.set(attr_name, new_rid)
     return cloned
 
 
