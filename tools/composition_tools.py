@@ -1275,31 +1275,7 @@ def register_composition_tools(
 
         _tag_slide_with_composition(new_slide, composition_name)
 
-        # iter 45 fix: cover slide must live at index 0. python-pptx's
-        # add_slide always APPENDS — so when an agent runs delete_slide(0)
-        # + add_cover_slide(...) (the validate_deck title-ladder
-        # recovery path), the new cover ends up at the end of the deck
-        # instead of at the start, the deck reads broken, and the agent
-        # gets confused trying to recover. Auto-move on append closes
-        # the gap.
-        if composition_name == "cover" and len(working.slides) > 1:
-            xml_slides = working.slides._sldIdLst
-            last_entry = list(xml_slides)[-1]
-            xml_slides.remove(last_entry)
-            xml_slides.insert(0, last_entry)
-
-        # closing slide must live at the END (mirror of the cover fix).
-        # If the agent calls add_closing_slide before realising it
-        # needs a different prior slide and then adds more, this guard
-        # is defensive — but the existing flow always appends so it
-        # naturally lands at the end. Only re-add to the end if a
-        # later composition got appended after closing (which should
-        # never happen but let's be robust).
-
-        slide_index = (
-            0 if composition_name == "cover"
-            else len(working.slides) - 1
-        )
+        slide_index = len(working.slides) - 1
         result: Dict[str, Any] = {
             "composition": composition_name,
             "slide_index": slide_index,
@@ -1474,35 +1450,29 @@ def register_composition_tools(
                 visual_indices = [i + 1 for i, c in enumerate(body) if c in VISUAL_RICH_COMPOSITIONS]
                 text_only_indices = [i + 1 for i, c in enumerate(body) if c in TEXT_ONLY_COMPOSITIONS]
                 pct = len(visual_indices) / len(body)
-                # Iter 45: threshold lowered 60% → 50%. Iter 44 sweep showed
-                # the 60% bar triggered panic-rebuild for any failure (agent
-                # would rebuild the entire deck rather than swap a single
-                # slide). 50% still catches the worst wall-of-text decks but
-                # leaves room for natural list-shaped content. The dev-side
-                # assess.ts probe stays at 60% — measurement aspires to the
-                # reference-deck bar; build-then-fix is more forgiving.
-                visual_ok = pct >= 0.5
+                visual_ok = pct >= 0.6
                 probe_results.append({
-                    "name": "visual-richness-min-50-pct",
+                    "name": "visual-richness-min-60-pct",
                     "passed": visual_ok,
                     "detail": None if visual_ok else (
                         f"Only {int(pct*100)}% of body slides use a visual-rich "
                         f"composition ({len(visual_indices)}/{len(body)}). "
-                        f"Text-only at body slide indices {text_only_indices}."
+                        f"Text-only slides at body indices {text_only_indices}. "
+                        f"Reference Bizzdesign decks run 76-88% visual-rich."
                     ),
                     "fix_hint": None if visual_ok else (
-                        f"Convert ONE text-only slide. Pick the slide from "
-                        f"indices {text_only_indices} whose content is most "
-                        f"visual: 3-4 numbers → add_stat_cards_slide; 4 short "
+                        f"Pick ONE text-only slide from indices {text_only_indices}, "
+                        f"call delete_slide(<that slide's full index>), and re-add "
+                        f"the same content using a visual-rich composition. "
+                        f"Matching: 3-4 numbers → add_stat_cards_slide; 4 short "
                         f"value props with descriptions → add_value_cards_slide; "
-                        f"3-9 capabilities in 3 columns → add_capability_grid_slide; "
-                        f"4-6 outcome lines → add_split_benefits_slide; chronological "
-                        f"events → add_timeline_slide; architecture / flow → "
-                        f"add_diagram_slide; numeric time-series → add_chart_slide. "
-                        f"Call delete_slide(<that index>) then the chosen tool. "
-                        f"DO NOT call create_presentation, switch_presentation, or "
-                        f"any low-level add_slide / add_text_box tool — only "
-                        f"delete + composition tools."
+                        f"3-9 capabilities organised in 3 columns → "
+                        f"add_capability_grid_slide; 4-6 outcome lines → "
+                        f"add_split_benefits_slide; chronological events → "
+                        f"add_timeline_slide; architecture / flow / sequence → "
+                        f"add_diagram_slide; time-series or multi-value comparison "
+                        f"→ add_chart_slide. Convert at least 1 text-only slide "
+                        f"per re-validate cycle until ≥ 60%."
                     ),
                 })
 
@@ -1540,12 +1510,13 @@ def register_composition_tools(
                     ),
                     "fix_hint": None if text_streak_ok else (
                         f"Pick the MIDDLE slide of the streak (index "
-                        f"{streak_slide_indices[len(streak_slide_indices)//2]}). "
-                        f"Call delete_slide(<that index>) then re-add with a "
-                        f"visual-rich composition (stat_cards / value_cards / "
-                        f"capability_grid / diagram / chart) matched to the "
-                        f"slide's content shape. DO NOT call create_presentation "
-                        f"or any low-level add_slide tool — composition tools only."
+                        f"{streak_slide_indices[len(streak_slide_indices)//2]}), "
+                        f"call delete_slide(<that index>), and re-add the same "
+                        f"content using a visual-rich composition (stat_cards, "
+                        f"value_cards, capability_grid, diagram, chart) to break "
+                        f"the streak. If the content really IS list-shaped, swap "
+                        f"two adjacent text-only slides' order so they don't sit "
+                        f"in a row."
                     ),
                 })
 
@@ -1566,13 +1537,12 @@ def register_composition_tools(
                     "Identify ONE body slide where the content is either "
                     "(a) numeric series / breakdown / comparison or (b) a "
                     "relationship / flow / sequence / dependency. "
-                    "Call delete_slide(<that index>) then add_chart_slide("
-                    "title, chart_type='bar|line|pie|doughnut', labels=[...], "
-                    "datasets=[...]) OR add_diagram_slide(title, "
+                    "delete_slide(<that index>) and re-add with "
+                    "add_chart_slide(title, chart_type='bar|line|pie|doughnut', "
+                    "labels=[...], datasets=[...]) OR add_diagram_slide(title, "
                     "mermaid='<source>'). If the brief truly has no numeric "
                     "or relational content, swap any bullets slide for a "
-                    "summary chart of the deck's key counts. DO NOT call "
-                    "create_presentation or low-level add_slide tools."
+                    "summary chart of the deck's key counts."
                 ),
             })
 
