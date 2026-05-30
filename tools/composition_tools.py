@@ -3283,6 +3283,14 @@ def register_composition_tools(
         TEXT_ONLY_TYPES = {
             "bullets", "solution_detail", "section_divider", "value_props_4",
         }
+        # Iter 58: which composition types actually carry a <p:pic>
+        # element after building. solution_detail strips its source
+        # pictures (iter 31). process_steps / timeline / closing are
+        # layout-built with text shapes only. bullets is layout-built.
+        HAS_PICTURE_TYPES = {
+            "cover", "stat_cards", "split_benefits",
+            "value_cards", "chart", "diagram", "capability_grid",
+        }
         spec_errors: List[Dict[str, Any]] = []
 
         # Length cap.
@@ -3319,6 +3327,36 @@ def register_composition_tools(
                         f"chart based on the content shape."
                     ),
                 })
+
+        # Iter 58: image-density across the WHOLE deck (incl. cover/closing
+        # so the count aligns with assess.ts' image-density probe). Reference
+        # Bizzdesign decks run 76-88%; we require 60%.
+        all_types = ["cover"] + body_types + ["closing"]
+        pic_count = sum(1 for t in all_types if t in HAS_PICTURE_TYPES)
+        density = pic_count / len(all_types) if all_types else 0
+        if density < 0.6:
+            text_only_body_idx = [
+                i for i, t in enumerate(body_types)
+                if t not in HAS_PICTURE_TYPES
+            ]
+            spec_errors.append({
+                "rule": "image-density-min-60-pct",
+                "detail": (
+                    f"Only {int(density*100)}% of slides carry a "
+                    f"<p:pic> element ({pic_count}/{len(all_types)}). "
+                    f"Need ≥ 60%. Body slide indices {text_only_body_idx} "
+                    f"are picture-less compositions "
+                    f"({sorted({body_types[i] for i in text_only_body_idx})}). "
+                    f"Convert at least "
+                    f"{max(1, (len(all_types)*6 + 9) // 10 - pic_count)} "
+                    f"to a picture-bearing composition (stat_cards / "
+                    f"split_benefits / value_cards / chart / diagram / "
+                    f"capability_grid). solution_detail strips pictures "
+                    f"by design — replace it; process_steps / timeline / "
+                    f"bullets / value_props_4 are layout-only without "
+                    f"pictures."
+                ),
+            })
 
         # has-chart-or-diagram for 8+ slide decks.
         if total_slides >= 8:
