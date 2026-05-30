@@ -2796,3 +2796,295 @@ def register_composition_tools(
             {"subhead": subhead, "title": title, "cards": cards},
             presentation_id,
         )
+
+    # ------------------------------------------------------------------
+    # ATOMIC BUILD: iter 49 rewrite
+    # ------------------------------------------------------------------
+    # `build_deck` takes the WHOLE deck spec as JSON and builds it in one
+    # shot. No partial state, no delete_slide loops, no validate-then-fix
+    # cycle. Either the spec is valid (deck builds and saves cleanly) or
+    # it's not (model gets back per-slide field errors and resubmits).
+    #
+    # Iter 44-48 confirmed the incremental build-then-fix architecture
+    # forces the agent through too many decision points where it panics:
+    # validate_deck fails → delete_slide loops corrupt order → rebuild
+    # cycles burn step budget → fail to save. Iter 48 final: 1 of 5
+    # briefs saved with rebuild-on-fail skill rule. Need a different shape.
+    #
+    # build_deck shape:
+    #   build_deck(
+    #       cover={"title": "...", "subtitle": "..."},
+    #       slides=[
+    #         {"type": "stat_cards", "subhead": "...", "intro": "...", "stats": [...]},
+    #         {"type": "value_cards", "subhead": "...", "title": "...", "cards": [...]},
+    #         ...one entry per body slide...
+    #       ],
+    #       closing={"title": "...", "cta_lines": [...]},
+    #   )
+    # → {"download_url": "...", "slide_count": N, "compositions_used": [...]}
+    # OR
+    # → {"errors": [{"slide_index": 3, "type": "stat_cards", "violations": [...]}], ...}
+
+    @app.tool(
+        annotations=ToolAnnotations(
+            title="Build Deck (Atomic)",
+            destructiveHint=False,
+        ),
+    )
+    def build_deck(
+        cover: Dict[str, Any],
+        slides: List[Dict[str, Any]],
+        closing: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build the whole deck in one atomic call from a structured spec.
+
+        Replaces the incremental add_*_slide flow. Pass the entire deck
+        as JSON: cover (title + subtitle), an ordered list of body
+        slides (each with a `type` field naming the composition), and
+        closing (title + cta_lines). The server creates a fresh
+        presentation from the brand template, builds every slide, and
+        saves to S3 — returning a single download URL on success or a
+        list of per-slide validation errors on failure.
+
+        ALWAYS use this. Do NOT mix with create_presentation /
+        add_*_slide / delete_slide / save_presentation_to_url — those
+        are legacy and being phased out.
+
+        Body slide types and their fields (omit any field not used):
+        - "stat_cards":     subhead, intro, stats[3-4] (each "VALUE\\nLABEL\\nATTRIBUTION")
+        - "value_cards":    subhead, title, cards[4] (each "Heading\\nDescription", 12-25 word descriptions)
+        - "value_props_4":  title, lead_claim, subtitle, pillars[4] (each ≤ 10 words)
+        - "capability_grid": subhead, cross_label, cross_intro, col_headings[3], cards[3|6|9]
+        - "process_steps":  subhead, title, intro, steps[4] (each "Name\\nDescription")
+        - "split_benefits": title (3-8 words), benefits[4|6] (each 5-12 words)
+        - "timeline":       subhead, events[4-12] (each "Date description", 3-10 words)
+        - "diagram":        title, mermaid, caption? (server renders + embeds)
+        - "chart":          title, chart_type ("bar"/"line"/"pie"/"doughnut"), labels[], datasets[], caption?
+        - "bullets":        title, subhead (1-5 words), bullets[3-6] (each ≤ 15 words)
+        - "solution_detail": category, title, benefits (15-60 words), details[3] (each "Heading\\nDescription", 12-30 word descriptions)
+        - "section_divider": kicker, title
+
+        cover format: {"title": "<assertion 7-12 words ≤ 60 chars>", "subtitle": "<topic line>"}
+        closing format: {"title": "<wrap-up ≤ 6 words ≤ 40 chars>", "cta_lines": ["...", "..."] (2-6 items, each ≤ 12 words ≤ 70 chars)}
+
+        On failure, the response includes a structured `errors` array. Each
+        entry says exactly which slide (by index in `slides`), which fields
+        violated their format, and how to fix. Rewrite those fields in the
+        spec and call `build_deck` again — no state to clean up.
+        """
+        import io
+        import os
+        import uuid
+        from datetime import datetime, timezone
+        import utils as ppt_utils
+
+        # Dispatch table: composition type → builder function from this module
+        builders = {
+            "cover": lambda s: add_cover_slide(s["title"], s["subtitle"]),
+            "section_divider": lambda s: add_section_divider(s["kicker"], s["title"]),
+            "bullets": lambda s: add_bullets_slide(s["title"], s["subhead"], s["bullets"]),
+            "solution_detail": lambda s: add_solution_detail_slide(
+                s["category"], s["title"], s["benefits"], s["details"],
+            ),
+            "stat_cards": lambda s: add_stat_cards_slide(
+                s["subhead"], s["intro"], s["stats"],
+            ),
+            "value_props_4": lambda s: add_value_props_slide(
+                s["title"], s["lead_claim"], s["subtitle"], s["pillars"],
+            ),
+            "value_cards": lambda s: add_value_cards_slide(
+                s["subhead"], s["title"], s["cards"],
+            ),
+            "capability_grid": lambda s: add_capability_grid_slide(
+                s["subhead"], s["cross_label"], s["cross_intro"],
+                s["col_headings"], s["cards"],
+            ),
+            "process_steps": lambda s: add_process_steps_slide(
+                s["subhead"], s["title"], s["intro"], s["steps"],
+            ),
+            "split_benefits": lambda s: add_split_benefits_slide(
+                s["title"], s["benefits"],
+            ),
+            "timeline": lambda s: add_timeline_slide(s["subhead"], s["events"]),
+            "diagram": lambda s: add_diagram_slide(
+                s["title"], s["mermaid"], s.get("caption"),
+            ),
+            "chart": lambda s: add_chart_slide(
+                s["title"], s["chart_type"], s["labels"],
+                s["datasets"], s.get("caption"),
+            ),
+            "closing": lambda s: add_closing_slide(s["title"], s["cta_lines"]),
+        }
+
+        # Step 1: create a fresh presentation from the brand template.
+        default_template = os.environ.get("PPTX_DEFAULT_TEMPLATE", "").strip()
+        if not default_template:
+            return {
+                "error": "PPTX_DEFAULT_TEMPLATE env var is not set on the MCP server.",
+            }
+        # Resolve the template path the same way create_presentation does.
+        if os.path.exists(default_template):
+            resolved_template_path = default_template
+        else:
+            template_name = os.path.basename(default_template)
+            resolved_template_path = None
+            from tools.presentation_tools import (
+                _strip_template_slides,
+            )
+            # Walk through known search directories — same set the
+            # create_presentation tool uses.
+            search_paths = [
+                "/app/templates",
+                ".",
+                "./templates",
+                "./assets",
+                "./resources",
+            ]
+            for d in search_paths:
+                candidate = os.path.join(d, template_name)
+                if os.path.exists(candidate):
+                    resolved_template_path = candidate
+                    break
+            if resolved_template_path is None:
+                return {
+                    "error": f"Template not found: {default_template}",
+                }
+        # Import _strip_template_slides if not imported above.
+        from tools.presentation_tools import _strip_template_slides, _purge_orphan_slide_parts, _get_s3_client
+
+        try:
+            pres = ppt_utils.create_presentation_from_template(resolved_template_path)
+            _strip_template_slides(pres)
+        except Exception as e:
+            return {"error": f"Failed to load template: {e}"}
+
+        # Step 2: register the new presentation in the shared state so
+        # the inner add_*_slide functions (which depend on the
+        # presentations dict + library_template_paths) can find it.
+        # iter 47 state-reset: flush prior decks first.
+        pres_id = f"build_deck_{uuid.uuid4().hex[:8]}"
+        presentations.clear()
+        library_template_paths.clear()
+        presentations[pres_id] = pres
+        library_template_paths[pres_id] = resolved_template_path
+        # The inner add_*_slide functions resolve presentation_id from
+        # get_current_presentation_id(); set it to our new id so they
+        # operate on this deck.
+        try:
+            from ppt_mcp_server import set_current_presentation_id
+            set_current_presentation_id(pres_id)
+        except Exception:
+            # If we can't import set_current_presentation_id, the inner
+            # functions will still find pres_id via get_current_presentation_id
+            # if the caller set it. Best effort.
+            pass
+
+        # Step 3: build all slides in spec order. Cover → body → closing.
+        # Collect errors per slide rather than short-circuiting; that way
+        # the caller gets a complete picture of what to fix in one shot.
+        errors: List[Dict[str, Any]] = []
+        compositions_used: List[str] = []
+
+        def call_builder(slide_index: int, slide_type: str, slide_spec: Dict[str, Any]):
+            builder = builders.get(slide_type)
+            if builder is None:
+                errors.append({
+                    "slide_index": slide_index,
+                    "type": slide_type,
+                    "error": f"Unknown composition type: {slide_type!r}",
+                    "valid_types": sorted(builders.keys()),
+                })
+                return
+            try:
+                result = builder(slide_spec)
+            except KeyError as e:
+                errors.append({
+                    "slide_index": slide_index,
+                    "type": slide_type,
+                    "error": f"Missing required field: {e}",
+                    "spec": slide_spec,
+                })
+                return
+            except Exception as e:
+                errors.append({
+                    "slide_index": slide_index,
+                    "type": slide_type,
+                    "error": f"Builder exception: {type(e).__name__}: {e}",
+                    "spec": slide_spec,
+                })
+                return
+            if isinstance(result, dict) and result.get("error"):
+                errors.append({
+                    "slide_index": slide_index,
+                    "type": slide_type,
+                    "error": result["error"],
+                    "violations": result.get("violations", []),
+                    "action": result.get("action"),
+                    "spec": slide_spec,
+                })
+                return
+            compositions_used.append(slide_type)
+
+        # Cover (always slide 0)
+        call_builder(0, "cover", cover)
+        # Body slides
+        for i, slide_spec in enumerate(slides):
+            slide_type = slide_spec.get("type")
+            if not slide_type:
+                errors.append({
+                    "slide_index": i + 1,
+                    "error": "Slide spec missing required 'type' field",
+                    "spec": slide_spec,
+                })
+                continue
+            call_builder(i + 1, slide_type, slide_spec)
+        # Closing (always last)
+        call_builder(len(slides) + 1, "closing", closing)
+
+        # Step 4: if any errors, bail without saving. The presentation
+        # is discarded (will be flushed by the next build_deck call).
+        if errors:
+            return {
+                "ok": False,
+                "errors": errors,
+                "compositions_built_so_far": compositions_used,
+                "action": (
+                    "Fix the listed field violations in the spec and call build_deck "
+                    "again with the corrected JSON. The deck is rebuilt from scratch "
+                    "each call — no partial state to clean up."
+                ),
+            }
+
+        # Step 5: save to S3.
+        bucket = os.environ.get("PPTX_OUTPUT_BUCKET")
+        if not bucket:
+            return {"error": "PPTX_OUTPUT_BUCKET env var is not set on the MCP server."}
+        region = os.environ.get("AWS_REGION") or os.environ.get(
+            "AWS_DEFAULT_REGION"
+        ) or "us-east-1"
+        try:
+            buffer = io.BytesIO()
+            presentations[pres_id].save(buffer)
+            cleaned = _purge_orphan_slide_parts(buffer.getvalue())
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            key = f"pptx/{timestamp}-{uuid.uuid4()}.pptx"
+            client = _get_s3_client()
+            client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=cleaned,
+                ContentType=(
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                ),
+            )
+            url = f"https://s3.{region}.amazonaws.com/{bucket}/{key}"
+        except Exception as e:
+            return {"error": f"Failed to save deck: {type(e).__name__}: {e}"}
+
+        return {
+            "ok": True,
+            "download_url": url,
+            "s3_key": key,
+            "slide_count": len(slides) + 2,  # cover + body + closing
+            "compositions_used": compositions_used,
+        }
