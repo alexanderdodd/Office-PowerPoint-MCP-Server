@@ -1909,15 +1909,19 @@ def register_composition_tools(
             _rename_shape(new_slide.shapes.title, "title")
             _widen_title_full_width(new_slide, working)
 
-        # Clear the body placeholder (idx 14 on Basic Text) — the picture
-        # replaces it. We just blank the text; the placeholder shape
-        # remains but invisible.
+        # Iter 52 fix: REMOVE every non-title placeholder rather than
+        # just clearing its text frame. Clearing leaves the placeholder
+        # shape in place, and PowerPoint then renders the layout's
+        # default "Click to add text" prompt for that empty shape. The
+        # user-reported chart slide had two visible "Click to add text"
+        # placeholders flanking the chart image (langfuse trace
+        # 4be8f6cc, 2026-05-30). Removing the shapes outright is the
+        # only way to suppress the prompt.
         for ph in list(new_slide.placeholders):
-            if ph.placeholder_format.idx not in (0,):  # keep title
-                try:
-                    ph.text_frame.clear()
-                except Exception:
-                    pass
+            if ph.placeholder_format.idx == 0:
+                continue  # keep title
+            sp = ph._element
+            sp.getparent().remove(sp)
 
         # Drop the picture centered in the body region.
         # Standard 16:9 slide is 13.333in × 7.5in (12192000 × 6858000 EMU).
