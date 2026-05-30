@@ -1158,7 +1158,10 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
                 values = []
             for i, matcher in enumerate(spec):
                 is_paired = "heading_match" in matcher and "description_match" in matcher
-                if i < len(values):
+                # Iter 56: None at index i means "leave this slot empty"
+                # (used by capability_grid to remap 3/6 cards across cols).
+                # Treat the same as "no value supplied" → clear the shape.
+                if i < len(values) and values[i] is not None:
                     if is_paired:
                         _apply_paired(shapes, matcher, values[i], role_base=f"{field_name}[{i}]")
                     else:
@@ -1174,8 +1177,8 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
                         _claim(shape)
                         _rename_shape(shape, f"{field_name}[{i}]")
                 else:
-                    # User supplied fewer values than the template has slots —
-                    # blank the unused shape(s).
+                    # User supplied fewer values than the template has slots
+                    # (or explicit None) — blank the unused shape(s).
                     if is_paired:
                         _clear_paired(shapes, matcher)
                     else:
@@ -2807,15 +2810,23 @@ def register_composition_tools(
             cross_label: Cross-cutting label that spans the top center, ≤ 5 words.
             cross_intro: Intro paragraph framing the grid, 8-20 words.
             col_headings: EXACTLY 3 column headings, each ≤ 4 words.
-            cards: EXACTLY 3, 6, or 9 cards (one full column at a time).
-                The template arranges cards 3-per-column × 3-columns;
-                partial columns leave visible empty whitespace. If your
-                content is 4 cards → use value_cards; 5 → use bullets;
-                7-8 → split across two capability_grid slides. Each card
-                is a string formatted as "Heading\\nOne-line description".
-                Heading ≤ 4 words. Description 5-15 words. Cards fill
-                column 1 first (top to bottom), then column 2, then
-                column 3.
+            cards: EXACTLY 3, 6, or 9 cards. The server distributes cards
+                ACROSS the three columns so each column shows roughly the
+                same number of cards.
+                  - n=3 → ONE card per column at row 1. Order: [col1,
+                    col2, col3]. e.g. col_headings ["Search", "Canvas",
+                    "Documentation"] + cards [search-card, canvas-card,
+                    doc-card].
+                  - n=6 → TWO cards per column. Order:
+                    [col1-row1, col1-row2, col2-row1, col2-row2,
+                    col3-row1, col3-row2].
+                  - n=9 → full 3×3 grid. Order:
+                    [col1-row1, col1-row2, col1-row3, col2-row1, ...,
+                    col3-row3].
+                If your content is 4 cards → use value_cards; 5 →
+                bullets; 7-8 → split across two capability_grid slides.
+                Each card is "Heading\\nOne-line description". Heading
+                ≤ 4 words. Description 5-15 words.
         """
         violations: List[str] = []
         if len(subhead.split()) > 6:
@@ -2874,6 +2885,29 @@ def register_composition_tools(
                     "with rich descriptions) or split across multiple capability_grid slides."
                 ),
             }
+        # Iter 56: remap N<9 cards across columns so they sit one-per-column
+        # (top rows of each column) instead of stacking all in column 1.
+        # The composition's `cards` matchers are ordered column-by-column
+        # (slots 0/1/2 in col 1, 3/4/5 in col 2, 6/7/8 in col 3). Without
+        # this remap, n=3 fills slots [0,1,2] = entire col 1, leaving cols
+        # 2/3 visibly empty (llm-legacy iter 55 slide 5).
+        if len(cards) == 3:
+            # one card per column at the top row → slots [0, 3, 6]
+            remapped = [None] * 9
+            remapped[0] = cards[0]
+            remapped[3] = cards[1]
+            remapped[6] = cards[2]
+            cards = remapped
+        elif len(cards) == 6:
+            # two cards per column → slots [0,1,3,4,6,7]
+            remapped = [None] * 9
+            remapped[0] = cards[0]
+            remapped[1] = cards[1]
+            remapped[3] = cards[2]
+            remapped[4] = cards[3]
+            remapped[6] = cards[4]
+            remapped[7] = cards[5]
+            cards = remapped
         return _build_composition(
             "capability_grid",
             {
