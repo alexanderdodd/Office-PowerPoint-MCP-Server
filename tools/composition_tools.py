@@ -400,62 +400,89 @@ def _set_shape_multiline(shape, lines: List[str]) -> None:
         return segments
 
     def _set_segments_preserving_styles(p_el, lines):
-        """For a paragraph with N <a:br/>-separated run-segments, set
-        the i-th segment's combined run text to lines[i]. Preserves each
-        segment's rPr. If fewer lines than segments, drops trailing
-        segments and their preceding `<a:br/>`. If more lines, falls
-        back to single-paragraph behaviour (caller handles overflow).
+        """For a paragraph with N <a:br/>-separated run-segments, split
+        the segments into separate <a:p> paragraphs and apply lines[i]
+        to the i-th paragraph, preserving each segment's first-run rPr.
+
+        Iter 55 change: previously this helper wrote back as a SINGLE
+        paragraph with <a:br/> between segments. That produced tighter
+        line-spacing than sibling shapes that legitimately used 2
+        paragraphs (e.g. process_steps step 0 came out visibly
+        compressed against steps 1–3, which the template authored as
+        2 paragraphs). Splitting into separate paragraphs makes step 0
+        match the others' line-spacing while still preserving each
+        segment's rPr (so the description still renders at 14pt).
+
+        Returns True if all lines were applied (one per segment slot),
+        False otherwise (caller falls through to per-paragraph path).
         """
+        from lxml import etree
+
         children = [c for c in p_el if c.tag.endswith("}r") or c.tag.endswith("}br") or c.tag.endswith("}endParaRPr")]
         # Group runs into segments, separated by brs.
-        segments = []   # list of (list_of_run_elements, preceding_br_or_None)
+        segments = []   # list of run-element-lists
         cur = []
-        last_br = None
         for c in children:
             if c.tag.endswith("}r"):
                 cur.append(c)
             elif c.tag.endswith("}br"):
                 if cur:
-                    segments.append((cur, last_br))
+                    segments.append(cur)
                     cur = []
-                last_br = c
             elif c.tag.endswith("}endParaRPr"):
-                # End of paragraph marker — close any pending segment.
                 if cur:
-                    segments.append((cur, last_br))
+                    segments.append(cur)
                     cur = []
-                last_br = None
         if cur:
-            segments.append((cur, last_br))
+            segments.append(cur)
         if not segments:
             return False
-        # Apply each line to its segment (truncate either way).
-        applied = 0
-        for i, line in enumerate(lines):
-            if i >= len(segments):
-                break
-            run_elements, _br = segments[i]
-            # Keep the first run, drop the rest, set its <a:t> to the line.
-            first_run = run_elements[0]
-            for r in run_elements[1:]:
-                p_el.remove(r)
-            t = first_run.find(f"{{{a_ns}}}t")
-            if t is None:
-                from lxml import etree
-                t = etree.SubElement(first_run, f"{{{a_ns}}}t")
-            t.text = line
-            applied += 1
-        # If there are more segments than lines, drop the trailing
-        # segments and their preceding <a:br/>.
-        if len(segments) > len(lines):
-            for i in range(len(lines), len(segments)):
-                run_elements, br = segments[i]
-                if br is not None and br in p_el:
-                    p_el.remove(br)
-                for r in run_elements:
-                    if r in p_el:
-                        p_el.remove(r)
-        return applied == len(lines)
+        n_apply = min(len(lines), len(segments))
+        if n_apply == 0:
+            return False
+
+        # First segment stays in p_el. Strip the br separators from p_el
+        # and remove everything past the first segment's first run.
+        first_run = segments[0][0]
+        # Set the first segment's text.
+        t = first_run.find(f"{{{a_ns}}}t")
+        if t is None:
+            t = etree.SubElement(first_run, f"{{{a_ns}}}t")
+        t.text = lines[0]
+        # Drop sibling runs after the first run, and drop brs.
+        for c in list(p_el):
+            if c is first_run:
+                continue
+            if c.tag.endswith("}r"):
+                p_el.remove(c)
+            elif c.tag.endswith("}br"):
+                p_el.remove(c)
+
+        # Build a new <a:p> for each remaining segment we need to apply.
+        parent = p_el.getparent()
+        insert_at = list(parent).index(p_el)
+        for seg_idx in range(1, n_apply):
+            seg_runs = segments[seg_idx]
+            seg_first_run = seg_runs[0]
+            # Construct a fresh <a:p> with optional pPr cloned from the
+            # original paragraph (so alignment / margins carry across).
+            new_p = etree.SubElement(parent, f"{{{a_ns}}}p")
+            parent.remove(new_p)
+            orig_ppr = p_el.find(f"{{{a_ns}}}pPr")
+            if orig_ppr is not None:
+                new_p.append(deepcopy(orig_ppr))
+            # Clone the segment's first run (preserving its rPr) and
+            # set its text to the user's line.
+            new_run = deepcopy(seg_first_run)
+            new_t = new_run.find(f"{{{a_ns}}}t")
+            if new_t is None:
+                new_t = etree.SubElement(new_run, f"{{{a_ns}}}t")
+            new_t.text = lines[seg_idx]
+            new_p.append(new_run)
+            insert_at += 1
+            parent.insert(insert_at, new_p)
+
+        return n_apply == len(lines)
 
     def _set_para_text_preserving_style(p_el, new_text: str) -> None:
         """Set a paragraph's text to `new_text` while preserving the
