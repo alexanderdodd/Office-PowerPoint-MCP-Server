@@ -1021,6 +1021,45 @@ def _apply_fields(slide, fields_spec: Dict[str, Any], content: Dict[str, Any]) -
     return warnings
 
 
+def _strip_empty_placeholders(slide) -> None:
+    """Iter 52: drop any placeholder shape on the slide whose text frame
+    is empty (no text content) AND whose name is NOT prefixed with
+    `role:` (which means a composition tool deliberately populated it
+    and an empty paragraph there is structural, not a stray prompt).
+
+    PowerPoint renders an unfilled placeholder with the layout's
+    default "Click to add text" prompt. That prompt is visible to the
+    end user even though there's no real content. Stripping the empty
+    placeholders is the only way to suppress the prompt from showing
+    on the rendered slide.
+
+    Layout-built compositions (chart, diagram, bullets) inherit all of
+    the layout's placeholders when add_slide is called. Compositions
+    only populate a subset; the rest sit empty until we remove them.
+    """
+    P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    for shape in list(slide.placeholders):
+        sp = shape._element
+        name_el = sp.find(f".//{{{P_NS}}}cNvPr")
+        name = (name_el.get("name") if name_el is not None else "") or ""
+        # Skip role-tagged shapes — those were touched by the composition
+        # and any empty paragraphs there are intentional layout artefacts.
+        if name.startswith("role:"):
+            continue
+        # If the text frame has any non-empty paragraph, leave it.
+        text_frame = shape.text_frame if shape.has_text_frame else None
+        has_content = False
+        if text_frame is not None:
+            for p in text_frame.paragraphs:
+                if (p.text or "").strip():
+                    has_content = True
+                    break
+        if has_content:
+            continue
+        # Remove the placeholder from the slide's shape tree.
+        sp.getparent().remove(sp)
+
+
 def _clear_starting_with(slide, prefixes: List[str]) -> None:
     """Defensive cleanup: blank any shape whose text starts with one of
     the given prefixes. Used by compositions that leave behind original
@@ -1253,6 +1292,15 @@ def register_composition_tools(
                 new_slide = working.slides.add_slide(layout)
                 warnings = _apply_layout_fields(new_slide, content)
                 _widen_title_full_width(new_slide, working)
+                # iter 52: strip any placeholder we didn't populate. The
+                # Basic Text layout has title + subhead + body slots; if
+                # the composition only fills (say) the title shape, the
+                # other placeholders inherit the layout's "Click to add
+                # text" default text and render that prompt to the user.
+                # User feedback (2026-05-30) flagged this on chart slides
+                # where the layout's body and right-side placeholder both
+                # showed "Click to add text" boxes flanking the chart.
+                _strip_empty_placeholders(new_slide)
             else:
                 new_slide = _clone_slide_into(
                     working,
