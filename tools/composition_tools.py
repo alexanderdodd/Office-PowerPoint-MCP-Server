@@ -577,15 +577,43 @@ def _clone_pic_into(pic_element, src_slide, dst_slide):
     LINK_ATTR = f"{{{R_NS}}}link"
 
     cloned = deepcopy(pic_element)
-    src_part = src_slide.part
-    dst_part = dst_slide.part
+    _rewire_rids(cloned, src_slide.part, dst_slide.part)
+    return cloned
 
-    # Walk the entire subtree, not just <a:blip>. Any element that
-    # carries an r:embed or r:link references a relationship that must
-    # be rewired into the destination slide's rel graph.
-    for el in cloned.iter():
-        for attr_name in (EMBED_ATTR, LINK_ATTR):
-            old_rid = el.get(attr_name)
+
+def _rewire_rids(el, src_part, dst_part):
+    """Walk a shape XML subtree and rewire every relationship-attribute
+    (r:embed, r:link, r:id) so refs point at fresh relationships on the
+    destination slide.
+
+    Iter 43 introduced this for <p:pic> (image embeds + SVG sibling +
+    Office picture-effects layer). Iter 53 extends it to ALL cloned
+    shapes: <p:sp> shapes can carry <a:hlinkClick r:id="rIdN"> for
+    hyperlinks, <a:hlinkMouseOver>, <p:custDataLst r:id="...">,
+    chart-data refs, OLE embeds, audio/video media, etc. All of those
+    use the same relationship-attribute convention; without rewiring,
+    the cloned shape carries source-slide rIds that don't exist in the
+    destination slide's rels graph, triggering Microsoft's repair
+    prompt.
+
+    Driven by user feedback 2026-05-30: closing slide kept asking for
+    repair because the template's "Book a Demo / Partner Program /
+    Careers" CTA buttons carry <a:hlinkClick r:id="rId2..rId5">
+    pointing at external URLs — those rels never reached the
+    destination slide because the clone path only rewired r:embed/r:link
+    on <p:pic> elements.
+
+    Returns the count of rIds rewired (for debugging / probe purposes).
+    """
+    R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    EMBED_ATTR = f"{{{R_NS}}}embed"
+    LINK_ATTR = f"{{{R_NS}}}link"
+    ID_ATTR = f"{{{R_NS}}}id"
+    rid_attrs = (EMBED_ATTR, LINK_ATTR, ID_ATTR)
+    count = 0
+    for sub in el.iter():
+        for attr_name in rid_attrs:
+            old_rid = sub.get(attr_name)
             if old_rid is None:
                 continue
             try:
@@ -595,11 +623,31 @@ def _clone_pic_into(pic_element, src_slide, dst_slide):
                 # we don't write a dangling ref into the destination.
                 # PowerPoint forgives a missing attribute; it does not
                 # forgive a dangling rId.
-                del el.attrib[attr_name]
+                del sub.attrib[attr_name]
                 continue
-            new_rid = dst_part.relate_to(src_rel.target_part, src_rel.reltype)
-            el.set(attr_name, new_rid)
-    return cloned
+            # For external-target rels (hyperlinks point at URLs), the
+            # rel has target_mode="External" and no target_part. Use
+            # relate_to with the URL string instead of a part. python-pptx
+            # supports this via add_relationship — fall back if relate_to
+            # rejects an external target.
+            try:
+                new_rid = dst_part.relate_to(src_rel.target_part, src_rel.reltype)
+            except (AttributeError, ValueError, TypeError):
+                # External-target rel — copy directly via add_relationship.
+                try:
+                    target = src_rel.target_ref  # the URL string
+                    new_rid = dst_part.rels.get_or_add_ext_rel(
+                        src_rel.reltype, target
+                    )
+                except Exception:
+                    # Last resort: strip the attribute rather than leave
+                    # a dangling ref. Better to lose the hyperlink than
+                    # to trigger the repair prompt.
+                    del sub.attrib[attr_name]
+                    continue
+            sub.set(attr_name, new_rid)
+            count += 1
+    return count
 
 
 def _clone_slide_into(working_pres, library_pres, source_index: int, strip_pictures: bool = False):
@@ -652,6 +700,13 @@ def _clone_slide_into(working_pres, library_pres, source_index: int, strip_pictu
             continue
         cloned = deepcopy(child)
         _replace_spautofit_with_normautofit(cloned)
+        # iter 53: rewire r:id / r:embed / r:link on every cloned
+        # non-pic shape. <p:pic> elements are handled separately by
+        # _clone_pic_into; everything else (text shapes with hyperlinks,
+        # group shapes containing pics, OLE objects) needs the same
+        # treatment or hyperlinks point at missing rels and Microsoft
+        # PowerPoint prompts to repair.
+        _rewire_rids(cloned, src_slide.part, new_slide.part)
         new_tree.append(cloned)
 
     return new_slide
