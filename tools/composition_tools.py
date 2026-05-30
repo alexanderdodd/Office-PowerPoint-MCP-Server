@@ -233,6 +233,14 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
             "title": {"match": "Thank You", "required": True},
             "cta_lines": {"match": "Book a Demo", "required": True},
         },
+        # Iter 57: template's cta_lines render at 10pt — too small for
+        # board / leadership decks. Visual judge (iter 55 platform-rearch
+        # slide 9) flagged "small font size makes bullets hard to read".
+        # Bumping to 14pt — combined with the iter 57 cap tightening to
+        # ≤ 50 chars per line, the larger text still fits the column.
+        "set_run_sz_for_role": {
+            "cta_lines": 1400,
+        },
     },
     "value_cards": {
         "source_slide_index": 29,  # slide 30 (0-indexed)
@@ -1320,6 +1328,47 @@ def _tighten_first_paragraph_line_spacing(slide, spec: Dict[str, Any]) -> None:
         pPr.insert(0, lnSpc)
 
 
+def _set_run_sz_for_role(slide, role_to_sz: Dict[str, int]) -> None:
+    """Iter 57: post-clone hook to override the font size on every run
+    inside shapes whose role matches a key in `role_to_sz`. Used when
+    the template's source-slide font size is too small/large for the
+    composition's intended use (e.g. closing.cta_lines is 10pt in the
+    template — too small for a leadership audience).
+
+    Shape role is determined by the `role:` prefix of its `<p:cNvPr name>`
+    attribute (set by `_rename_shape` during field application).
+    """
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    for shape in list(slide.shapes):
+        if not shape.has_text_frame:
+            continue
+        name = (shape.name or "")
+        if not name.startswith("role:"):
+            continue
+        role = name[len("role:"):]
+        # Allow either exact match ("cta_lines") or prefix-style for
+        # paired fields ("cards[0].heading" → check "cards" base).
+        sz = role_to_sz.get(role)
+        if sz is None:
+            # Try the field root before the first '['/'.'
+            root = role
+            for sep in ("[", "."):
+                idx = root.find(sep)
+                if idx != -1:
+                    root = root[:idx]
+            sz = role_to_sz.get(root)
+        if sz is None:
+            continue
+        for p in shape.text_frame._txBody.findall(f"{{{A_NS}}}p"):
+            for r in p.findall(f"{{{A_NS}}}r"):
+                rpr = r.find(f"{{{A_NS}}}rPr")
+                if rpr is None:
+                    from lxml import etree as _et
+                    rpr = _et.SubElement(r, f"{{{A_NS}}}rPr")
+                    r.insert(0, rpr)
+                rpr.set("sz", str(int(sz)))
+
+
 # ------------------------------------------------------------------
 # Layout-built compositions (no source slide clone)
 # ------------------------------------------------------------------
@@ -1505,6 +1554,10 @@ def register_composition_tools(
                 tighten = comp.get("tighten_first_paragraph_line_spacing")
                 if tighten:
                     _tighten_first_paragraph_line_spacing(new_slide, tighten)
+                # Iter 57: per-composition font size override by role.
+                set_run_sz_for_role = comp.get("set_run_sz_for_role")
+                if set_run_sz_for_role:
+                    _set_run_sz_for_role(new_slide, set_run_sz_for_role)
         except Exception as e:
             return {"error": f"Failed to build {composition_name}: {e}"}
 
@@ -2412,11 +2465,16 @@ def register_composition_tools(
                         f"narrow CTA columns without right-edge truncation. "
                         f"Got: {line!r}"
                     )
-                elif cc > 70:
+                elif cc > 50:
+                    # Iter 57: tightened from 70 → 50 chars. Combined with
+                    # the 14pt cta_lines font (set_run_sz_for_role), 50
+                    # chars fits the narrow column without wrapping;
+                    # 70 chars wrapped to two lines on platform-rearch
+                    # iter 55 slide 9.
                     violations.append(
                         f"cta_lines[{i}] is {cc} chars; closing CTAs must be "
-                        f"≤ 70 chars to fit the column width without truncation. "
-                        f"Got: {line!r}"
+                        f"≤ 50 chars to fit the column at 14pt without "
+                        f"wrapping. Got: {line!r}"
                     )
         if violations:
             return {
