@@ -2836,6 +2836,7 @@ def register_composition_tools(
         cover: Dict[str, Any],
         slides: List[Dict[str, Any]],
         closing: Dict[str, Any],
+        headline_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build the whole deck in one atomic call from a structured spec.
 
@@ -2867,6 +2868,28 @@ def register_composition_tools(
 
         cover format: {"title": "<assertion 7-12 words ≤ 60 chars>", "subtitle": "<topic line>"}
         closing format: {"title": "<wrap-up ≤ 6 words ≤ 40 chars>", "cta_lines": ["...", "..."] (2-6 items, each ≤ 12 words ≤ 70 chars)}
+
+        headline_message (RECOMMENDED): pass the brief's ONE-line
+        headline message — the single thing the audience should walk
+        away believing. When supplied, build_deck runs a title-ladder
+        check: the cover title+subtitle MUST reference at least 40% of
+        the headline's key terms (substantive words, length ≥ 4,
+        stopwords excluded). This catches the "cover doesn't anchor
+        the headline" failure mode upfront. If you omit it the check
+        is skipped, but the assess-side probe will fire post-hoc.
+
+        Spec-level rules enforced upfront (rejection blocks build):
+        - Deck length 5-15 slides (cover + body + closing).
+        - Visual richness ≥ 50% — at least half of body slides use
+          value_cards, capability_grid, stat_cards, split_benefits,
+          timeline, diagram, chart, or process_steps. Bullets and
+          solution_detail are the workhorses but mass overuse reads
+          as a wall of text.
+        - has-chart-or-diagram on 8+ slide decks.
+        - No 3+ text-only body slides in a row (bullets, solution_detail,
+          section_divider, value_props_4 count as text-only).
+        - title-ladder if headline_message is supplied (cover must
+          reference ≥ 40% of headline key terms).
 
         On failure, the response includes a structured `errors` array. Each
         entry says exactly which slide (by index in `slides`), which fields
@@ -2916,6 +2939,151 @@ def register_composition_tools(
             ),
             "closing": lambda s: add_closing_slide(s["title"], s["cta_lines"]),
         }
+
+        # iter 50: structural spec checks BEFORE building anything. These
+        # catch the most common iter 49 sweep failures upfront so the model
+        # gets a fast, structured error rather than discovering the problem
+        # after a successful build via post-hoc assess.ts probes:
+        #   - title-ladder (cover must reference ≥ 40% of headline terms)
+        #   - visual-richness (≥ 50% of body slides must use a visual-rich composition)
+        #   - has-chart-or-diagram (8+ slide decks need at least one)
+        #   - no 3+ text-only slides in a row
+        #   - deck length (3-15 slides total — cover + closing + body)
+        VISUAL_RICH_TYPES = {
+            "value_cards", "capability_grid", "stat_cards",
+            "split_benefits", "timeline", "diagram", "chart", "process_steps",
+        }
+        TEXT_ONLY_TYPES = {
+            "bullets", "solution_detail", "section_divider", "value_props_4",
+        }
+        spec_errors: List[Dict[str, Any]] = []
+
+        # Length cap.
+        total_slides = len(slides) + 2  # cover + body + closing
+        if total_slides < 5:
+            spec_errors.append({
+                "rule": "deck-length",
+                "detail": f"Deck has {total_slides} slides (cover + {len(slides)} body + closing). Need ≥ 5 total — add more body slides.",
+            })
+        elif total_slides > 15:
+            spec_errors.append({
+                "rule": "deck-length",
+                "detail": f"Deck has {total_slides} slides. Cap is 15 — drop {total_slides - 15} body slides.",
+            })
+
+        # Visual richness over body slides.
+        body_types = [s.get("type") for s in slides if s.get("type")]
+        if body_types:
+            visual_count = sum(1 for t in body_types if t in VISUAL_RICH_TYPES)
+            pct = visual_count / len(body_types)
+            if pct < 0.5:
+                text_only_idx = [
+                    i for i, t in enumerate(body_types) if t in TEXT_ONLY_TYPES
+                ]
+                spec_errors.append({
+                    "rule": "visual-richness-min-50-pct",
+                    "detail": (
+                        f"Only {int(pct*100)}% of body slides use a visual-rich "
+                        f"composition ({visual_count}/{len(body_types)}). "
+                        f"Body slide indices {text_only_idx} are text-only "
+                        f"({set(body_types[i] for i in text_only_idx)}). Convert "
+                        f"at least one to value_cards / capability_grid / "
+                        f"stat_cards / split_benefits / timeline / diagram / "
+                        f"chart based on the content shape."
+                    ),
+                })
+
+        # has-chart-or-diagram for 8+ slide decks.
+        if total_slides >= 8:
+            has_cd = any(t in ("chart", "diagram") for t in body_types)
+            if not has_cd:
+                spec_errors.append({
+                    "rule": "has-chart-or-diagram",
+                    "detail": (
+                        f"Deck has {total_slides} slides but no chart or diagram. "
+                        f"For numeric content (growth / breakdown / comparison) "
+                        f"use a chart; for architecture / flow / sequence use a "
+                        f"diagram. Pick one body slide and convert."
+                    ),
+                })
+
+        # No 3+ consecutive text-only slides.
+        if len(body_types) >= 3:
+            longest_text_run = 0
+            current_run = 0
+            worst_start = -1
+            run_start = -1
+            for i, t in enumerate(body_types):
+                if t in TEXT_ONLY_TYPES:
+                    if current_run == 0:
+                        run_start = i
+                    current_run += 1
+                    if current_run > longest_text_run:
+                        longest_text_run = current_run
+                        worst_start = run_start
+                else:
+                    current_run = 0
+            if longest_text_run > 2:
+                spec_errors.append({
+                    "rule": "no-text-only-streak-over-2",
+                    "detail": (
+                        f"Text-only compositions run {longest_text_run} in a row "
+                        f"at body slide indices {list(range(worst_start, worst_start + longest_text_run))}. "
+                        f"Three in a row is a wall of text. Swap the middle one "
+                        f"for a visual-rich composition."
+                    ),
+                })
+
+        # Title-ladder: cover must reference ≥ 40% of headline_message key terms.
+        if headline_message:
+            import re as _re
+            stopwords = {
+                "a", "an", "the", "and", "or", "but", "is", "are", "was", "were",
+                "be", "been", "being", "to", "of", "in", "on", "at", "for", "with",
+                "by", "from", "as", "that", "this", "these", "those", "it", "its",
+                "we", "our", "us", "you", "your", "their", "they", "them",
+                "have", "has", "had", "will", "would", "should", "can", "could",
+                "may", "might", "must", "do", "does", "did", "not", "no",
+                "than", "then", "now", "so", "if", "when", "where", "who",
+                "what", "how", "why", "one", "two", "three", "four", "five",
+                "more", "most", "less", "each", "into", "about",
+            }
+            def _key_terms(text):
+                return {
+                    w for w in _re.sub(r"[^a-z0-9\s%$£€]", " ", (text or "").lower()).split()
+                    if len(w) >= 4 and w not in stopwords
+                }
+            headline_terms = _key_terms(headline_message)
+            if len(headline_terms) >= 3:
+                cover_text = " ".join([
+                    cover.get("title", ""),
+                    cover.get("subtitle", ""),
+                ])
+                cover_terms = _key_terms(cover_text)
+                hits = headline_terms & cover_terms
+                cov = len(hits) / len(headline_terms)
+                if cov < 0.4:
+                    missing = sorted(headline_terms - cover_terms)[:6]
+                    spec_errors.append({
+                        "rule": "title-ladder-cover",
+                        "detail": (
+                            f"Cover title+subtitle reference {int(cov*100)}% "
+                            f"of headline key terms (need ≥ 40%). Headline: "
+                            f"'{headline_message}'. Add at least 2-3 of these "
+                            f"verbatim into the cover title or subtitle: {missing}."
+                        ),
+                    })
+
+        if spec_errors:
+            return {
+                "ok": False,
+                "spec_errors": spec_errors,
+                "action": (
+                    "Fix the spec-level rule violations above and resubmit. "
+                    "These checks run BEFORE any slide builds — no partial "
+                    "deck was created."
+                ),
+            }
 
         # Step 1: create a fresh presentation from the brand template.
         default_template = os.environ.get("PPTX_DEFAULT_TEMPLATE", "").strip()
