@@ -369,6 +369,94 @@ def _set_shape_multiline(shape, lines: List[str]) -> None:
 
     a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
+    # Iter 54: detect source paragraphs that use `<a:br/>` to separate
+    # multiple text runs at DIFFERENT styles (e.g. process_steps source
+    # `TextBox 4` has heading-run + <a:br/> + description-run with
+    # sz=1400 in a single paragraph). Treat each run-segment as its own
+    # "line slot" and apply the user's lines preserving each segment's
+    # per-run styling. Without this, the function would keep only the
+    # FIRST run's style and apply it to every line, making the
+    # description render at the heading's larger font and overflow the
+    # step box (user complaint 2026-05-30 on slide 4 of the AI
+    # capability deck).
+    def _segment_count(p_el):
+        """Count run-or-br segments in this paragraph that we can target.
+        A run between brs counts as a segment; an empty <a:br/> counts
+        as a separator, not a segment. Pure-run-no-br paragraphs return 1.
+        """
+        children = [c for c in p_el if c.tag.endswith("}r") or c.tag.endswith("}br")]
+        if not children:
+            return 0
+        # Count contiguous run blocks separated by br.
+        segments = 0
+        in_run_block = False
+        for c in children:
+            if c.tag.endswith("}r"):
+                if not in_run_block:
+                    segments += 1
+                    in_run_block = True
+            elif c.tag.endswith("}br"):
+                in_run_block = False
+        return segments
+
+    def _set_segments_preserving_styles(p_el, lines):
+        """For a paragraph with N <a:br/>-separated run-segments, set
+        the i-th segment's combined run text to lines[i]. Preserves each
+        segment's rPr. If fewer lines than segments, drops trailing
+        segments and their preceding `<a:br/>`. If more lines, falls
+        back to single-paragraph behaviour (caller handles overflow).
+        """
+        children = [c for c in p_el if c.tag.endswith("}r") or c.tag.endswith("}br") or c.tag.endswith("}endParaRPr")]
+        # Group runs into segments, separated by brs.
+        segments = []   # list of (list_of_run_elements, preceding_br_or_None)
+        cur = []
+        last_br = None
+        for c in children:
+            if c.tag.endswith("}r"):
+                cur.append(c)
+            elif c.tag.endswith("}br"):
+                if cur:
+                    segments.append((cur, last_br))
+                    cur = []
+                last_br = c
+            elif c.tag.endswith("}endParaRPr"):
+                # End of paragraph marker — close any pending segment.
+                if cur:
+                    segments.append((cur, last_br))
+                    cur = []
+                last_br = None
+        if cur:
+            segments.append((cur, last_br))
+        if not segments:
+            return False
+        # Apply each line to its segment (truncate either way).
+        applied = 0
+        for i, line in enumerate(lines):
+            if i >= len(segments):
+                break
+            run_elements, _br = segments[i]
+            # Keep the first run, drop the rest, set its <a:t> to the line.
+            first_run = run_elements[0]
+            for r in run_elements[1:]:
+                p_el.remove(r)
+            t = first_run.find(f"{{{a_ns}}}t")
+            if t is None:
+                from lxml import etree
+                t = etree.SubElement(first_run, f"{{{a_ns}}}t")
+            t.text = line
+            applied += 1
+        # If there are more segments than lines, drop the trailing
+        # segments and their preceding <a:br/>.
+        if len(segments) > len(lines):
+            for i in range(len(lines), len(segments)):
+                run_elements, br = segments[i]
+                if br is not None and br in p_el:
+                    p_el.remove(br)
+                for r in run_elements:
+                    if r in p_el:
+                        p_el.remove(r)
+        return applied == len(lines)
+
     def _set_para_text_preserving_style(p_el, new_text: str) -> None:
         """Set a paragraph's text to `new_text` while preserving the
         styling of its first run (font, size, colour, bold, etc.)."""
@@ -394,6 +482,19 @@ def _set_shape_multiline(shape, lines: List[str]) -> None:
             from lxml import etree
             t = etree.SubElement(first_run, f"{{{a_ns}}}t")
         t.text = new_text
+
+    # Iter 54: if the source has a SINGLE paragraph with multiple
+    # <a:br/>-separated run-segments at different rPr styles (e.g.
+    # process_steps' TextBox 4 has heading-run + br + 14pt description-run
+    # in one paragraph), map our lines onto those segments preserving
+    # each segment's style. Falls through to the normal per-paragraph
+    # path when source has multiple paragraphs or single-segment paragraphs.
+    if (
+        len(original_paras) == 1
+        and _segment_count(original_paras[0]._p) >= 2
+        and _set_segments_preserving_styles(original_paras[0]._p, lines)
+    ):
+        return
 
     # Update existing paragraphs in place (preserves per-paragraph styling).
     for i in range(min(len(lines), len(original_paras))):
