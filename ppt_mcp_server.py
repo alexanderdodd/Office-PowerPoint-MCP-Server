@@ -248,6 +248,7 @@ register_composition_tools(
     presentations,
     get_current_presentation_id,
     library_template_paths,
+    set_current_presentation_id,
 )
 
 register_content_tools(

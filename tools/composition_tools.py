@@ -1203,6 +1203,7 @@ def register_composition_tools(
     presentations: Dict,
     get_current_presentation_id,
     library_template_paths: Dict[str, str],
+    set_current_presentation_id=None,
 ):
     """Register the composition tools with the FastMCP app.
 
@@ -2969,15 +2970,19 @@ def register_composition_tools(
         library_template_paths[pres_id] = resolved_template_path
         # The inner add_*_slide functions resolve presentation_id from
         # get_current_presentation_id(); set it to our new id so they
-        # operate on this deck.
-        try:
-            from ppt_mcp_server import set_current_presentation_id
-            set_current_presentation_id(pres_id)
-        except Exception:
-            # If we can't import set_current_presentation_id, the inner
-            # functions will still find pres_id via get_current_presentation_id
-            # if the caller set it. Best effort.
-            pass
+        # operate on this deck. set_current_presentation_id is the
+        # closure passed into register_composition_tools — required
+        # for build_deck to function correctly.
+        if set_current_presentation_id is None:
+            return {
+                "error": (
+                    "Server misconfiguration: set_current_presentation_id "
+                    "not passed to register_composition_tools. build_deck "
+                    "cannot reset the current_presentation_id and would "
+                    "leave inner add_*_slide calls stranded."
+                ),
+            }
+        set_current_presentation_id(pres_id)
 
         # Step 3: build all slides in spec order. Cover → body → closing.
         # Collect errors per slide rather than short-circuiting; that way
