@@ -3478,9 +3478,15 @@ def register_composition_tools(
                 "ok": False,
                 "spec_errors": spec_errors,
                 "action": (
-                    "Fix the spec-level rule violations above and resubmit. "
-                    "These checks run BEFORE any slide builds — no partial "
-                    "deck was created."
+                    "Fix the spec-level rule violations above and call "
+                    "build_deck AGAIN with the revised spec. These are "
+                    "CONTENT problems (your slide types / titles / counts) "
+                    "— NOT a template availability problem, NOT a server "
+                    "problem. The brand template is loaded; build_deck is "
+                    "the only correct tool. DO NOT call create_presentation, "
+                    "add_*_slide, list_template_files, or any other tool — "
+                    "just revise the spec and retry build_deck. Up to 6 "
+                    "consecutive retries are expected and encouraged."
                 ),
             }
 
