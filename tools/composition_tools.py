@@ -131,6 +131,14 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
         "source_slide_index": 12,  # slide 13
         "description": "Section subhead + cross-cutting label + intro + 3 column headings + 9 capability cards in a 3x3 grid (each card has a heading AND a short description).",
         "use_when": "When the content is a MAP of many capabilities organised into 3 columns, with multiple sub-items per column. Each card is 'Heading\\nOne-line description'. Up to 9 cards (3 per column).",
+        # Iter 70: when n=3 or n=6 cards, the bottom row(s) of each
+        # column are empty but the column-background rectangles still
+        # extend to y=7.50in (slide bottom). User reported the result
+        # looks "off, missing background images" because of the large
+        # empty grey area at the bottom of each column. Shrink the 3
+        # column backgrounds (Rectangle 3/5/6) to cover only the rows
+        # that have content.
+        "cap_grid_column_bg_shapes": ["Rectangle 3", "Rectangle 5", "Rectangle 6"],
         "fields": {
             "subhead": {"match": "Bizzdesign", "required": True},
             "cross_label": {"match": "Transformation Collaboration", "required": True},
@@ -1337,6 +1345,48 @@ def _tighten_first_paragraph_line_spacing(slide, spec: Dict[str, Any]) -> None:
         pPr.insert(0, lnSpc)
 
 
+def _resize_cap_grid_backgrounds(slide, shape_names: List[str], n_filled: int) -> None:
+    """Iter 70: shrink the capability_grid column-background rectangles
+    when only some rows are populated. Default template extends each
+    background to y=7.50in (bottom of slide) under the assumption that
+    all 3 rows are filled (n_filled=9). At n=6 (rows 1-2 only) shrink
+    so the bottom matches the bottom card's bottom; at n=3 (row 1 only)
+    shrink further.
+
+    Card y positions in the template (after iter-56 remap):
+      - row 1 cards: heading y=3.23in, description y=3.53in (ends ~3.93)
+      - row 2 cards: heading y=4.42in, description y=4.85in (ends ~5.25)
+      - row 3 cards: heading y=5.75in, description y=6.19in (ends ~6.59)
+    Backgrounds start at y=2.52in (under column headings).
+    """
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    if n_filled <= 3:
+        new_cy_in = 1.85  # ends at y=4.37in, just below row-1 cards
+    elif n_filled <= 6:
+        new_cy_in = 3.10  # ends at y=5.62in, just below row-2 cards
+    else:
+        return  # n=9, no resize needed
+    new_cy_emu = int(new_cy_in * 914400)
+    for shape in list(slide.shapes):
+        if shape.name not in shape_names:
+            continue
+        sp = shape._element
+        sp_pr = sp.find(f"{{{P_NS}}}spPr")
+        if sp_pr is None:
+            continue
+        xfrm = sp_pr.find(f"{{{A_NS}}}xfrm")
+        if xfrm is None:
+            continue
+        ext = xfrm.find(f"{{{A_NS}}}ext")
+        if ext is None:
+            continue
+        try:
+            ext.set("cy", str(new_cy_emu))
+        except Exception:
+            pass
+
+
 def _shift_role_y_emu(slide, role_to_delta: Dict[str, int]) -> None:
     """Iter 66: shift the Y position of shapes by role. Negative delta
     moves up. Used by solution_detail to close the mid-slide whitespace
@@ -1613,6 +1663,16 @@ def register_composition_tools(
                 shift_role_y_emu = comp.get("shift_role_y_emu")
                 if shift_role_y_emu:
                     _shift_role_y_emu(new_slide, shift_role_y_emu)
+                # Iter 70: shrink capability_grid column backgrounds when
+                # only rows 1-2 (n=6) or row 1 (n=3) are filled.
+                cap_grid_bg_shapes = comp.get("cap_grid_column_bg_shapes")
+                if cap_grid_bg_shapes:
+                    n_filled = sum(
+                        1 for c in (content.get("cards") or []) if c is not None
+                    )
+                    _resize_cap_grid_backgrounds(
+                        new_slide, cap_grid_bg_shapes, n_filled
+                    )
         except Exception as e:
             return {"error": f"Failed to build {composition_name}: {e}"}
 
