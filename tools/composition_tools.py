@@ -3474,19 +3474,40 @@ def register_composition_tools(
                     })
 
         if spec_errors:
+            # Iter 60: return only ONE spec_error per call. The sandbox
+            # agent panics ("template missing") when shown multiple spec
+            # failures at once; one-at-a-time turns each retry into a
+            # focused fix rather than a triage exercise. Order: structural
+            # (deck-length, has-chart-or-diagram), then density rules,
+            # then title-ladder. The remaining rules surface on the next
+            # call after the agent fixes this one.
+            order = [
+                "deck-length",
+                "has-chart-or-diagram",
+                "no-text-only-streak-over-2",
+                "visual-richness-min-50-pct",
+                "image-density-min-60-pct",
+                "title-ladder-cover",
+                "title-ladder-body",
+            ]
+            ranked = sorted(
+                spec_errors,
+                key=lambda e: order.index(e["rule"]) if e["rule"] in order else 99,
+            )
+            top = ranked[0]
             return {
                 "ok": False,
-                "spec_errors": spec_errors,
+                "spec_errors": [top],
                 "action": (
-                    "Fix the spec-level rule violations above and call "
-                    "build_deck AGAIN with the revised spec. These are "
-                    "CONTENT problems (your slide types / titles / counts) "
-                    "— NOT a template availability problem, NOT a server "
-                    "problem. The brand template is loaded; build_deck is "
-                    "the only correct tool. DO NOT call create_presentation, "
-                    "add_*_slide, list_template_files, or any other tool — "
-                    "just revise the spec and retry build_deck. Up to 6 "
-                    "consecutive retries are expected and encouraged."
+                    f"Fix the '{top['rule']}' violation above and retry "
+                    f"build_deck with the revised spec. This is a CONTENT "
+                    f"problem in your spec — NOT a template availability "
+                    f"problem, NOT a server problem. The brand template "
+                    f"is loaded; build_deck is the only correct tool. "
+                    f"DO NOT call create_presentation, add_*_slide, "
+                    f"list_template_files, or any other tool. Up to 6 "
+                    f"retries are expected; each retry should land "
+                    f"meaningful spec changes."
                 ),
             }
 
