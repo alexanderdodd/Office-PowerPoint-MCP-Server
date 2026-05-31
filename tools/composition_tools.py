@@ -2458,11 +2458,33 @@ def register_composition_tools(
                 "font": {"weight": "bold", "size": 12},
             }
 
+        # Iter 67: apply Bizzdesign brand palette to datasets that don't
+        # already carry per-series colors. Improves visual cohesion with
+        # the brand template.
+        BRAND_PALETTE = ["#1659FF", "#00247E", "#53D576", "#FFD607", "#9259EF"]
+        styled_datasets: List[Dict[str, Any]] = []
+        for i, ds in enumerate(datasets):
+            ds = dict(ds)  # avoid mutating caller's dict
+            color = BRAND_PALETTE[i % len(BRAND_PALETTE)]
+            if chart_type in ("pie", "doughnut"):
+                if "backgroundColor" not in ds:
+                    n = len(ds.get("data") or [])
+                    ds["backgroundColor"] = [BRAND_PALETTE[k % len(BRAND_PALETTE)] for k in range(n)]
+            elif chart_type == "line":
+                ds.setdefault("borderColor", color)
+                ds.setdefault("backgroundColor", color)
+                ds.setdefault("borderWidth", 3)
+                ds.setdefault("pointRadius", 4)
+            else:  # bar
+                ds.setdefault("backgroundColor", color)
+                ds.setdefault("borderColor", color)
+            styled_datasets.append(ds)
+
         chart_config = {
             "type": chart_type,
             "data": {
                 "labels": labels,
-                "datasets": datasets,
+                "datasets": styled_datasets,
             },
             "options": chart_options,
         }
