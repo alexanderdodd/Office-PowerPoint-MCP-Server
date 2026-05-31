@@ -2088,6 +2088,21 @@ def register_composition_tools(
                     "'Sept 2025 ...') followed by a 2-10 word description."
                 ),
             }
+        # Iter 69: redistribute N<12 events evenly across the 12 template
+        # slots so the text labels span the full timeline width instead of
+        # clumping on the left. User reported (2026-05-31): "milestones
+        # should be evenly spread out, not clumped together on the bottom
+        # left" on a 6-event roadmap deck.
+        SLOT_COUNT = 12
+        if 1 < len(events) < SLOT_COUNT:
+            n = len(events)
+            remapped: List[Any] = [None] * SLOT_COUNT
+            # Spread events across [0, SLOT_COUNT-1] inclusive — first
+            # always at slot 0, last always at slot SLOT_COUNT-1.
+            for i in range(n):
+                slot = round(i * (SLOT_COUNT - 1) / (n - 1))
+                remapped[slot] = events[i]
+            events = remapped
         return _build_composition(
             "timeline",
             {"subhead": subhead, "events": events},
