@@ -3328,35 +3328,12 @@ def register_composition_tools(
                     ),
                 })
 
-        # Iter 58: image-density across the WHOLE deck (incl. cover/closing
-        # so the count aligns with assess.ts' image-density probe). Reference
-        # Bizzdesign decks run 76-88%; we require 60%.
-        all_types = ["cover"] + body_types + ["closing"]
-        pic_count = sum(1 for t in all_types if t in HAS_PICTURE_TYPES)
-        density = pic_count / len(all_types) if all_types else 0
-        if density < 0.6:
-            text_only_body_idx = [
-                i for i, t in enumerate(body_types)
-                if t not in HAS_PICTURE_TYPES
-            ]
-            spec_errors.append({
-                "rule": "image-density-min-60-pct",
-                "detail": (
-                    f"Only {int(density*100)}% of slides carry a "
-                    f"<p:pic> element ({pic_count}/{len(all_types)}). "
-                    f"Need ≥ 60%. Body slide indices {text_only_body_idx} "
-                    f"are picture-less compositions "
-                    f"({sorted({body_types[i] for i in text_only_body_idx})}). "
-                    f"Convert at least "
-                    f"{max(1, (len(all_types)*6 + 9) // 10 - pic_count)} "
-                    f"to a picture-bearing composition (stat_cards / "
-                    f"split_benefits / value_cards / chart / diagram / "
-                    f"capability_grid). solution_detail strips pictures "
-                    f"by design — replace it; process_steps / timeline / "
-                    f"bullets / value_props_4 are layout-only without "
-                    f"pictures."
-                ),
-            })
+        # Iter 58 (REVERTED iter 61): image-density spec validator
+        # caused the sandbox agent to panic ('template missing')
+        # whenever the threshold wasn't met on the first 1-2 calls.
+        # Probe still runs post-build in assess.ts; spec validation
+        # left only the older softer rules. Will revisit when
+        # sandbox-agent retry behaviour is more robust.
 
         # has-chart-or-diagram for 8+ slide decks.
         if total_slides >= 8:
