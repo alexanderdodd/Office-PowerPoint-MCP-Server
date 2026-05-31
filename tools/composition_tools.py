@@ -2300,6 +2300,8 @@ def register_composition_tools(
         labels: List[str],
         datasets: List[Dict[str, Any]],
         caption: Optional[str] = None,
+        y_axis_title: Optional[str] = None,
+        x_axis_title: Optional[str] = None,
         presentation_id: Optional[str] = None,
     ) -> Dict:
         """Add a slide with a server-rendered chart (bar, line, pie, doughnut).
@@ -2327,6 +2329,12 @@ def register_composition_tools(
                 For pie/doughnut, use a single dataset; the values become
                 the slice sizes.
             caption: Optional one-line caption (≤ 15 words).
+            y_axis_title: REQUIRED for bar/line charts. Y-axis label
+                including unit, e.g. "ARR ($M)", "GDP growth (% YoY)",
+                "Latency p95 (ms)". Visual judge consistently flags
+                un-labelled axes as a severe defect.
+            x_axis_title: Optional X-axis label. Often unnecessary when
+                labels are self-explanatory (years, quarters, regions).
 
         Returns the slide_index of the new slide and composition tag `chart`.
         """
@@ -2356,10 +2364,43 @@ def register_composition_tools(
                     )
         if caption is not None and len(caption.split()) > 15:
             violations.append(f"caption is {len(caption.split())} words; max is 15.")
+        # Iter 64: require y_axis_title for bar/line charts — visual
+        # judge flagged un-labelled axes as severe defect on multiple
+        # iterations (econ-2026 slide 4/5 iter 55+62+63).
+        if chart_type in ("bar", "line") and not (y_axis_title and y_axis_title.strip()):
+            violations.append(
+                f"y_axis_title is required for {chart_type} charts. "
+                f"Provide the unit, e.g. 'ARR ($M)', 'GDP growth (% YoY)', "
+                f"'Latency p95 (ms)'."
+            )
         if violations:
             return {
                 "error": "add_chart_slide content doesn't fit. NO slide was added.",
                 "violations": violations,
+            }
+
+        chart_options: Dict[str, Any] = {
+            "plugins": {
+                "legend": {"display": len(datasets) > 1 or chart_type in ("pie", "doughnut")},
+            },
+            "responsive": False,
+        }
+        # Iter 64: add axis titles + data labels for bar/line charts.
+        if chart_type in ("bar", "line"):
+            scales: Dict[str, Any] = {}
+            if y_axis_title and y_axis_title.strip():
+                scales["y"] = {"title": {"display": True, "text": y_axis_title.strip()}}
+            if x_axis_title and x_axis_title.strip():
+                scales["x"] = {"title": {"display": True, "text": x_axis_title.strip()}}
+            if scales:
+                chart_options["scales"] = scales
+            # Data labels on top of each point/bar — agent-visible numbers
+            # the visual judge looks for.
+            chart_options["plugins"]["datalabels"] = {
+                "anchor": "end",
+                "align": "top",
+                "color": "#333",
+                "font": {"weight": "bold", "size": 12},
             }
 
         chart_config = {
@@ -2368,12 +2409,7 @@ def register_composition_tools(
                 "labels": labels,
                 "datasets": datasets,
             },
-            "options": {
-                "plugins": {
-                    "legend": {"display": len(datasets) > 1 or chart_type in ("pie", "doughnut")},
-                },
-                "responsive": False,
-            },
+            "options": chart_options,
         }
         try:
             png_bytes = _fetch_chart_png(chart_config)
@@ -3263,6 +3299,8 @@ def register_composition_tools(
             "chart": lambda s: add_chart_slide(
                 s["title"], s["chart_type"], s["labels"],
                 s["datasets"], s.get("caption"),
+                y_axis_title=s.get("y_axis_title"),
+                x_axis_title=s.get("x_axis_title"),
             ),
             "closing": lambda s: add_closing_slide(s["title"], s["cta_lines"]),
         }
