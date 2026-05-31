@@ -3439,39 +3439,13 @@ def register_composition_tools(
                         ),
                     })
 
-                # Iter 59: also check the deck-level body-coverage check
-                # the assess.ts title-ladder probe runs (≥ 60% of headline
-                # terms collectively referenced across body slides).
-                # Walk every string field in each body slide so we catch
-                # titles, subheads, intros, headings, descriptions.
-                def _collect_text(obj):
-                    if obj is None:
-                        return ""
-                    if isinstance(obj, str):
-                        return obj
-                    if isinstance(obj, dict):
-                        return " ".join(_collect_text(v) for v in obj.values())
-                    if isinstance(obj, list):
-                        return " ".join(_collect_text(v) for v in obj)
-                    return ""
-                body_text = " ".join(_collect_text(s) for s in slides)
-                body_terms = _key_terms(body_text)
-                body_hits = headline_terms & body_terms
-                body_cov = len(body_hits) / len(headline_terms)
-                if body_cov < 0.6:
-                    missing_body = sorted(headline_terms - body_terms)[:8]
-                    spec_errors.append({
-                        "rule": "title-ladder-body",
-                        "detail": (
-                            f"Body slides collectively reference {int(body_cov*100)}% "
-                            f"of headline key terms (need ≥ 60%). Headline: "
-                            f"'{headline_message}'. Weave at least 2-3 of these "
-                            f"missing terms into body slide titles or content: "
-                            f"{missing_body}. Anchor each priority/section back "
-                            f"to a substantive word from the headline so the "
-                            f"deck stays threaded to the core message."
-                        ),
-                    })
+                # Iter 59 (REVERTED iter 60c): body-coverage validator
+                # disabled because forcing the agent to hit 60% headline-
+                # term coverage across body slides caused it to abandon
+                # build_deck after one failure. Probe still runs in
+                # assess.ts post-build; will revisit when agent retry
+                # behaviour is more robust.
+                pass
 
         if spec_errors:
             # Iter 60: return only ONE spec_error per call. The sandbox
