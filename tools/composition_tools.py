@@ -198,6 +198,11 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
         "source_slide_index": 3,  # slide 4 (0-indexed) — "Our Growth Story" year-by-year
         "description": "Subhead + 4-12 chronological events on a horizontal timeline with year/date markers.",
         "use_when": "When the content is a chronological story (founding history, product launches, hiring sequence, contract milestones, customer journey by year). Each event is `Date Description` in one string — the year/date at the start anchors the marker. Events 4-12, each ≤ 12 words.",
+        # Iter 71: when n<12 events, delete the Oval markers + dashed
+        # connector lines for empty slots so only the dots that have
+        # labels remain. User reported "There are dots with no label
+        # shouldn't be there" on a 4-event delivery-phases roadmap.
+        "timeline_clean_empty_markers": True,
         "fields": {
             "subhead": {"match": "Our Growth Story", "required": True},
             "events": [
@@ -1345,6 +1350,120 @@ def _tighten_first_paragraph_line_spacing(slide, spec: Dict[str, Any]) -> None:
         pPr.insert(0, lnSpc)
 
 
+def _timeline_clean_empty_markers(slide) -> None:
+    """Iter 71: delete the Oval marker dots + dashed Straight-Connector
+    lines for timeline slots whose text label is empty.
+
+    Template slide 4 layout (per slot):
+      - TextBox at (label_x, label_y), with a year prefix
+      - Oval (ellipse, 0.26in diameter) at (label_x + ~0.4, label_y - 1.85)
+      - Straight Connector (only on alternating slots) at
+        (label_x + ~0.55, label_y - 1.4)
+
+    Identify slot dots+lines by horizontal proximity to a TextBox shape.
+    Delete those whose nearest TextBox is empty.
+    """
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    EMU = 914400
+
+    def shape_xy(shape) -> Optional[tuple]:
+        sp = shape._element
+        sp_pr = sp.find(f"{{{P_NS}}}spPr")
+        if sp_pr is None:
+            return None
+        xfrm = sp_pr.find(f"{{{A_NS}}}xfrm")
+        if xfrm is None:
+            return None
+        off = xfrm.find(f"{{{A_NS}}}off")
+        if off is None:
+            return None
+        try:
+            return (int(off.get("x", 0)) / EMU, int(off.get("y", 0)) / EMU)
+        except Exception:
+            return None
+
+    def shape_geom(shape) -> str:
+        sp = shape._element
+        sp_pr = sp.find(f"{{{P_NS}}}spPr")
+        if sp_pr is None:
+            return ""
+        geom = sp_pr.find(f"{{{A_NS}}}prstGeom")
+        return geom.get("prst", "") if geom is not None else ""
+
+    def shape_text(shape) -> str:
+        if not getattr(shape, "has_text_frame", False):
+            return ""
+        try:
+            return (shape.text_frame.text or "").strip()
+        except Exception:
+            return ""
+
+    # Categorise shapes
+    text_boxes = []  # (x, y, text)
+    ovals = []       # python-pptx shape objects (ellipses)
+    connectors = []  # python-pptx shape objects (lines / cxnSp)
+    for shape in list(slide.shapes):
+        xy = shape_xy(shape)
+        if xy is None:
+            continue
+        x, y = xy
+        geom = shape_geom(shape)
+        # Only consider timeline-region shapes (y > 1.0 to skip title)
+        if y < 1.0:
+            continue
+        if geom == "ellipse":
+            ovals.append(shape)
+        elif geom == "line":
+            connectors.append(shape)
+        elif shape_text(shape) and y > 2.0:
+            # TextBox with content sits in the lower half of the slide
+            text_boxes.append((x, y, shape))
+
+    # For each ellipse, find the nearest TextBox in X; if no TextBox
+    # within ~1.0in OR the nearest TextBox is the wrong vertical
+    # neighbour, the slot is empty — delete the ellipse.
+    # Simpler heuristic: a filled slot has a TextBox near (oval_x - 0.5,
+    # oval_y + 1.85). Find the closest TextBox; if X-distance > 1.0in or
+    # the TextBox is empty/non-existent, delete.
+    for oval in list(ovals):
+        ox, oy = shape_xy(oval)
+        # The label sits ~0.4in left of the oval and ~1.85in below.
+        target_x = ox - 0.4
+        target_y = oy + 1.85
+        nearest = None
+        nearest_d = 999.0
+        for tx, ty, t_shape in text_boxes:
+            d = abs(tx - target_x) + abs(ty - target_y)
+            if d < nearest_d:
+                nearest_d = d
+                nearest = (tx, ty, t_shape)
+        if nearest is None or nearest_d > 1.2:
+            # No matching label → empty slot → delete the oval
+            sp = oval._element
+            sp.getparent().remove(sp)
+
+    # Now delete connectors that share an X position with a deleted
+    # oval — i.e. connectors whose nearest oval no longer exists.
+    # Reread ovals AFTER deletions:
+    remaining_ovals = []
+    for shape in list(slide.shapes):
+        xy = shape_xy(shape)
+        if xy is None:
+            continue
+        if shape_geom(shape) == "ellipse" and xy[1] >= 1.0:
+            remaining_ovals.append((xy[0], xy[1], shape))
+    for conn in list(connectors):
+        cx, cy = shape_xy(conn)
+        # A connector is paired with the oval ~0.15in to its left.
+        target_x = cx - 0.15
+        if any(abs(ox - target_x) < 0.3 for ox, _, _ in remaining_ovals):
+            continue
+        # No remaining oval at this x → delete the connector
+        sp = conn._element
+        sp.getparent().remove(sp)
+
+
 def _resize_cap_grid_backgrounds(slide, shape_names: List[str], n_filled: int) -> None:
     """Iter 70: shrink the capability_grid column-background rectangles
     when only some rows are populated. Default template extends each
@@ -1673,6 +1792,10 @@ def register_composition_tools(
                     _resize_cap_grid_backgrounds(
                         new_slide, cap_grid_bg_shapes, n_filled
                     )
+                # Iter 71: delete timeline Oval markers + connector lines
+                # for empty (label-less) slots.
+                if comp.get("timeline_clean_empty_markers"):
+                    _timeline_clean_empty_markers(new_slide)
         except Exception as e:
             return {"error": f"Failed to build {composition_name}: {e}"}
 
