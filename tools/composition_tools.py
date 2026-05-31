@@ -1420,26 +1420,24 @@ def _timeline_clean_empty_markers(slide) -> None:
             # TextBox with content sits in the lower half of the slide
             text_boxes.append((x, y, shape))
 
-    # For each ellipse, find the nearest TextBox in X; if no TextBox
-    # within ~1.0in OR the nearest TextBox is the wrong vertical
-    # neighbour, the slot is empty — delete the ellipse.
-    # Simpler heuristic: a filled slot has a TextBox near (oval_x - 0.5,
-    # oval_y + 1.85). Find the closest TextBox; if X-distance > 1.0in or
-    # the TextBox is empty/non-existent, delete.
+    # For each ellipse, the matching label sits ~0.4in to the LEFT and
+    # EITHER ~0.5in below (template's even slots, no connector) OR
+    # ~1.85in below (odd slots, with connector). Try both expected
+    # positions — keep the oval if a labelled TextBox is found at
+    # either one within tolerance.
     for oval in list(ovals):
         ox, oy = shape_xy(oval)
-        # The label sits ~0.4in left of the oval and ~1.85in below.
         target_x = ox - 0.4
-        target_y = oy + 1.85
-        nearest = None
-        nearest_d = 999.0
-        for tx, ty, t_shape in text_boxes:
-            d = abs(tx - target_x) + abs(ty - target_y)
-            if d < nearest_d:
-                nearest_d = d
-                nearest = (tx, ty, t_shape)
-        if nearest is None or nearest_d > 1.2:
-            # No matching label → empty slot → delete the oval
+        matched = False
+        for target_dy in (0.5, 1.85):
+            target_y = oy + target_dy
+            for tx, ty, _t in text_boxes:
+                if abs(tx - target_x) < 0.5 and abs(ty - target_y) < 0.5:
+                    matched = True
+                    break
+            if matched:
+                break
+        if not matched:
             sp = oval._element
             sp.getparent().remove(sp)
 
