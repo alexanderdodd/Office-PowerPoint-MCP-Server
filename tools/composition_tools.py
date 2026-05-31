@@ -93,6 +93,15 @@ COMPOSITIONS: Dict[str, Dict[str, Any]] = {
         # etc.) they show up as visually-impressive but completely off-
         # topic dashboard images. Strip them on this composition.
         "strip_pictures": True,
+        # Iter 66: template's 3 product UI screenshots filled y=3.14→5.60.
+        # After strip_pictures, the detail textboxes (y=5.54) sit awkwardly
+        # at the bottom of the slide with ~2.4in of empty whitespace above
+        # them. Shift each detail role-tagged shape up by 2.4in (2.4 *
+        # 914400 EMU/in = 2194560 EMU) so they sit just below the benefits
+        # paragraph (which ends at y=3.00).
+        "shift_role_y_emu": {
+            "details": -2194560,
+        },
     },
     "stat_cards": {
         "source_slide_index": 10,  # slide 11
@@ -1328,6 +1337,47 @@ def _tighten_first_paragraph_line_spacing(slide, spec: Dict[str, Any]) -> None:
         pPr.insert(0, lnSpc)
 
 
+def _shift_role_y_emu(slide, role_to_delta: Dict[str, int]) -> None:
+    """Iter 66: shift the Y position of shapes by role. Negative delta
+    moves up. Used by solution_detail to close the mid-slide whitespace
+    gap left after `strip_pictures` removes the template's product UI
+    screenshots.
+
+    Matches against the role-prefix root (e.g. role `details` matches
+    `role:details[0]`, `role:details[1]`, etc.).
+    """
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    for shape in list(slide.shapes):
+        name = (shape.name or "")
+        if not name.startswith("role:"):
+            continue
+        role = name[len("role:"):]
+        root = role
+        for sep in ("[", "."):
+            idx = root.find(sep)
+            if idx != -1:
+                root = root[:idx]
+        delta = role_to_delta.get(role) or role_to_delta.get(root)
+        if delta is None:
+            continue
+        sp = shape._element
+        sp_pr = sp.find(f"{{{P_NS}}}spPr")
+        if sp_pr is None:
+            continue
+        xfrm = sp_pr.find(f"{{{A_NS}}}xfrm")
+        if xfrm is None:
+            continue
+        off = xfrm.find(f"{{{A_NS}}}off")
+        if off is None:
+            continue
+        try:
+            y = int(off.get("y", 0))
+            off.set("y", str(y + int(delta)))
+        except Exception:
+            pass
+
+
 def _set_run_sz_for_role(slide, role_to_sz: Dict[str, int]) -> None:
     """Iter 57: post-clone hook to override the font size on every run
     inside shapes whose role matches a key in `role_to_sz`. Used when
@@ -1558,6 +1608,11 @@ def register_composition_tools(
                 set_run_sz_for_role = comp.get("set_run_sz_for_role")
                 if set_run_sz_for_role:
                     _set_run_sz_for_role(new_slide, set_run_sz_for_role)
+                # Iter 66: shift shape Y by role to close mid-slide
+                # whitespace gaps left by strip_pictures (e.g. solution_detail).
+                shift_role_y_emu = comp.get("shift_role_y_emu")
+                if shift_role_y_emu:
+                    _shift_role_y_emu(new_slide, shift_role_y_emu)
         except Exception as e:
             return {"error": f"Failed to build {composition_name}: {e}"}
 
