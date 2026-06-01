@@ -2269,19 +2269,34 @@ def register_composition_tools(
                     "'Sept 2025 ...') followed by a 2-10 word description."
                 ),
             }
-        # Iter 69: redistribute N<12 events evenly across the 12 template
-        # slots so the text labels span the full timeline width instead of
-        # clumping on the left. User reported (2026-05-31): "milestones
-        # should be evenly spread out, not clumped together on the bottom
-        # left" on a 6-event roadmap deck.
+        # Iter 69 + 73: redistribute N<12 events evenly across the 12
+        # template slots so the text labels span the full timeline width
+        # instead of clumping on the left.
+        #
+        # Iter 73: prefer even slots (0/2/4/6/8/10) when n ≤ 6. Even
+        # slots in the template have the dot directly above the label
+        # (Δy ≈ 0.5in). Odd slots (1/3/5/7/9/11) place the dot much
+        # higher up with a long dashed connector line down to the
+        # label — that looks awkward for roadmaps where every milestone
+        # is conceptually at the same altitude. n=12 still uses all
+        # slots (full template behaviour).
         SLOT_COUNT = 12
         if 1 < len(events) < SLOT_COUNT:
             n = len(events)
+            if n <= 6:
+                # Spread across the 6 even positions [0, 2, 4, 6, 8, 10].
+                even_slots = [0, 2, 4, 6, 8, 10]
+                chosen = [
+                    even_slots[round(i * (len(even_slots) - 1) / (n - 1))]
+                    for i in range(n)
+                ]
+            else:
+                # 7-11 events: span [0, 11] evenly across all slots.
+                chosen = [
+                    round(i * (SLOT_COUNT - 1) / (n - 1)) for i in range(n)
+                ]
             remapped: List[Any] = [None] * SLOT_COUNT
-            # Spread events across [0, SLOT_COUNT-1] inclusive — first
-            # always at slot 0, last always at slot SLOT_COUNT-1.
-            for i in range(n):
-                slot = round(i * (SLOT_COUNT - 1) / (n - 1))
+            for i, slot in enumerate(chosen):
                 remapped[slot] = events[i]
             events = remapped
         return _build_composition(
