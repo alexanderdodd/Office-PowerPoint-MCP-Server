@@ -1409,15 +1409,17 @@ def _timeline_clean_empty_markers(slide) -> None:
             continue
         x, y = xy
         geom = shape_geom(shape)
-        # Only consider timeline-region shapes (y > 1.0 to skip title)
-        if y < 1.0:
+        # Skip title-region shapes only. Slot 11's oval sits at y=0.95
+        # (slot 11 of 11), so the cutoff must be < 0.95. Subhead ends at
+        # ~y=0.78; use 0.85 as a safe floor.
+        if y < 0.85:
             continue
         if geom == "ellipse":
             ovals.append(shape)
         elif geom == "line":
             connectors.append(shape)
-        elif shape_text(shape) and y > 2.0:
-            # TextBox with content sits in the lower half of the slide
+        elif shape_text(shape) and y > 1.5:
+            # Text labels live below the subhead/cross-intro region.
             text_boxes.append((x, y, shape))
 
     # For each ellipse, the matching label sits ~0.4in to the LEFT and
