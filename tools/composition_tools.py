@@ -1080,17 +1080,34 @@ def _replace_spautofit_with_normautofit(element) -> None:
     shape). Brand layouts have fixed positions; auto-growing shapes
     overflow the design (e.g. stat-card text spilling below the white
     card rectangle).
+
+    Iter 76: don't set fontScale/lnSpcReduction. When those attributes
+    are present, PowerPoint treats them as a cached "current scale"
+    and follows them until the user touches the box. With fontScale
+    omitted, PowerPoint computes the right scale on first render so
+    the text doesn't overflow at file-open time (the
+    "click-to-rescale" bug the user reported on the split_benefits
+    bullet list).
     """
     from lxml import etree
     A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
     for bodyPr in element.iter(f"{{{A_NS}}}bodyPr"):
         sp_autofit = bodyPr.find(f"{{{A_NS}}}spAutoFit")
         if sp_autofit is not None:
-            # Replace with normAutofit (text auto-shrinks on overflow).
+            # Replace with bare normAutofit (text auto-shrinks on overflow,
+            # scale recomputed on first render).
             bodyPr.remove(sp_autofit)
-            norm = etree.SubElement(bodyPr, f"{{{A_NS}}}normAutofit")
-            norm.set("fontScale", "100000")
-            norm.set("lnSpcReduction", "0")
+            etree.SubElement(bodyPr, f"{{{A_NS}}}normAutofit")
+            continue
+        # Iter 76: strip stale fontScale/lnSpcReduction from existing
+        # normAutofit so PowerPoint recomputes on first render. The
+        # template's stock values were correct for the original content
+        # but become stale once we replace the text.
+        norm = bodyPr.find(f"{{{A_NS}}}normAutofit")
+        if norm is not None:
+            for attr in ("fontScale", "lnSpcReduction"):
+                if attr in norm.attrib:
+                    del norm.attrib[attr]
 
 
 # ------------------------------------------------------------------
