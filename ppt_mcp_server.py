@@ -8,7 +8,7 @@ import argparse
 from typing import Any, Dict, Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 # import utils  # Currently unused
 from tools import (
@@ -449,6 +449,62 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class SseToJsonMiddleware(BaseHTTPMiddleware):
+    """Convert FastMCP's text/event-stream responses to application/json.
+
+    AWS API Gateway REST (EDGE) buffers the full Lambda response before
+    forwarding it to the client. When the response content-type is
+    text/event-stream, CloudFront treats it as a never-ending stream and
+    returns 502 to the caller before the Lambda can complete. Converting
+    each SSE frame to a plain JSON response lets the standard AWS_PROXY
+    integration work correctly without requiring Lambda streaming mode.
+
+    Session state is unaffected: the mcp-session-id header is preserved
+    in both directions so FastMCP's in-memory session manager keeps
+    presentation state across the multiple tool calls that build a deck.
+    """
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        ct = response.headers.get("content-type", "")
+        if not ct.startswith("text/event-stream"):
+            return response
+
+        chunks: list[bytes] = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+        body = b"".join(chunks).decode(errors="replace")
+
+        # Extract the *last* JSON payload from the SSE stream. For
+        # single-request/response exchanges (initialize, tools/list,
+        # tools/call) there is exactly one data line. For tool calls that
+        # emit progress notifications the final data line carries the
+        # JSON-RPC result; intermediate notifications are dropped here but
+        # the client doesn't rely on them for correctness.
+        json_payload: Optional[str] = None
+        for line in body.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                json_payload = line[len("data:"):].strip()
+
+        if json_payload is None:
+            return response
+
+        # Preserve session bookkeeping header so the MCP client can
+        # resume state-bearing sessions with a matching mcp-session-id.
+        headers: dict[str, str] = {}
+        session_id = response.headers.get("mcp-session-id")
+        if session_id:
+            headers["mcp-session-id"] = session_id
+
+        return Response(
+            content=json_payload,
+            media_type="application/json",
+            headers=headers,
+            status_code=response.status_code,
+        )
+
+
 def _resolve_auth_token() -> Optional[str]:
     direct = os.environ.get("PPTX_AUTH_TOKEN")
     if direct:
@@ -496,6 +552,10 @@ def _serve_http(port: int) -> None:
 
     expected_token = _resolve_auth_token()
     starlette_app = app.streamable_http_app()
+
+    # Convert SSE → JSON so AWS API Gateway REST (EDGE / CloudFront) can
+    # forward responses without treating them as an infinite stream.
+    starlette_app.add_middleware(SseToJsonMiddleware)
 
     if expected_token:
         starlette_app.add_middleware(
